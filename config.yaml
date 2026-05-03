@@ -1,0 +1,43 @@
+# Tunable defaults for the GI guidelines RAG pipeline.
+# All values can be overridden by env vars or CLI flags later.
+
+# ---------- Embeddings ----------
+embedding:
+  # "voyage" or "openai". The chosen provider must match the schema dimension.
+  provider: voyage
+  voyage_model: voyage-3-large       # 1024-dim, retrieval-tuned
+  openai_model: text-embedding-3-large  # 3072-dim, fallback only
+  batch_size: 100                    # Voyage hard cap is 128; keep some headroom
+
+# ---------- Chunking ----------
+# These knobs are the most worth tuning once you eyeball Phase 2 output.
+# The chunker is section-aware: it splits long sections into overlapping windows
+# but never breaks a recommendation block mid-sentence.
+chunking:
+  target_tokens: 500       # aim for 400-600 tokens per chunk
+  min_tokens: 200          # below this, a chunk is merged with its neighbor
+  max_tokens: 800          # hard cap; above this we force a split on sentence boundary
+  overlap_tokens: 50       # context bleed between adjacent chunks
+  tokenizer: cl100k_base   # tiktoken encoding used for counting (GPT-4 family; fine as a proxy)
+
+# ---------- PDF parsing ----------
+parsing:
+  strategy: hi_res         # "hi_res" (best, slow) or "fast" (worse, ~10x faster)
+  infer_table_structure: true
+  fallback_to_fast_after_seconds: 600  # if hi_res hangs, fall back to fast
+
+# ---------- Retrieval (Phase 3) ----------
+retrieval:
+  top_k_dense: 20          # vector candidates pulled from pgvector
+  top_k_bm25: 20           # keyword candidates from Postgres FTS
+  rerank_top_n: 8          # final passages handed to the LLM after Cohere rerank
+  reranker_provider: cohere  # "cohere" or "bge_local"
+  cohere_model: rerank-english-v3.0
+
+# ---------- Generation (Phase 4) ----------
+generation:
+  model: claude-sonnet-4-5
+  max_tokens: 1500
+  temperature: 0.0         # deterministic; we want grounded extraction, not creativity
+  # Strict-grounding system prompt lives in src/generate/ (built in Phase 4).
+  refuse_when_no_evidence: true
