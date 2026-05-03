@@ -209,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     conn = get_db_connection()
     grand_chunks = 0
     grand_inserted = 0
+    failed = 0
     try:
         for doc in rows:
             logger.info("Ingesting: %s — %s (%d)", doc.society, doc.title, doc.year)
@@ -216,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
                 stats = ingest_one(conn, doc, config, embedder)
             except Exception as e:
                 logger.exception("FAILED to ingest %s: %s", doc.pdf_path, e)
+                failed += 1
                 continue
             grand_chunks += stats["chunks"]
             grand_inserted += stats["inserted"]
@@ -236,12 +238,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             print(
-                f"Ingested {grand_chunks} chunks from {len(rows)} documents "
+                f"Ingested {grand_chunks} chunks from {len(rows) - failed} documents "
                 f"into documents+chunks tables."
+                + (f" ({failed} failed; see logs above)" if failed else "")
             )
     finally:
         conn.close()
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
