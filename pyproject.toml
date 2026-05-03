@@ -25,11 +25,11 @@ dependencies = [
 
     # Postgres + pgvector
     "psycopg[binary]~=3.2.0",
-    "pgvector~=0.3.0",
+    "pgvector~=0.2.5",
 
     # API clients
     "anthropic~=0.39.0",
-    "voyageai~=0.3.0",
+    "voyageai~=0.2.3",
     "cohere~=5.11.0",
     "openai~=1.54.0",
 
