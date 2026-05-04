@@ -295,7 +295,29 @@ def _classify_element(elem: ParsedElement) -> str:
 
 
 _TR_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.DOTALL | re.IGNORECASE)
+_TH_RE = re.compile(r"<th[^>]*>(.*?)</th>", re.DOTALL | re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
+# "1." / "2a." / "10." at the start of a row, when the table is a
+# recommendations table — AGA pharma guidelines use this layout.
+_NUMBERED_ROW_RE = re.compile(r"^(?P<num>\d+[a-zA-Z]?)\s*\.\s*\S")
+# Headers that signal "this whole table is recommendations" — used to gate
+# the numbered-row extraction so we don't false-positive on data tables that
+# happen to have numbered rows ("1. study", etc.).
+_REC_HEADER_RE = re.compile(
+    # Stem-match (no trailing \b) so "recommendation"/"recommendations"/
+    # "statements" all hit. Leading \b only.
+    r"\b(recommend|statement|best\s+practice|key\s+concept|bpa|quality\s+indicator)",
+    re.IGNORECASE,
+)
+
+
+def _table_is_recommendations(table_html: str) -> bool:
+    """True if any <th> in the table mentions recommendation/statement/etc."""
+    for th_html in _TH_RE.findall(table_html):
+        text = _TAG_RE.sub(" ", th_html)
+        if _REC_HEADER_RE.search(text):
+            return True
+    return False
 
 
 def _extract_table_row_recommendations(
@@ -313,12 +335,17 @@ def _extract_table_row_recommendations(
     rendering. The row chunks live alongside it in the chunks table.
 
     AGA pharmacological-management guidelines (IBS-D, IBS-C, UC-pharm)
-    layout their recommendations as table rows; before this pass, the only
-    chunk surfacing in retrieval was the cell-flattened table text and
-    individual recommendation_id metadata was never populated.
+    layout their recommendations as table rows where the rec text is
+    labeled with a bare number ("1.", "2a.", "2b.", "3.") rather than the
+    literal word "Recommendation". For those tables we detect a
+    "recommendations" column header in <th>, and when present accept
+    numbered-row leads as recommendations, synthesizing a recommendation_id.
+    GRADE strength/evidence on each row are then filled in by
+    :func:`_extract_grade_metadata` during the final annotation pass.
     """
     if not table_html:
         return []
+    is_rec_table = _table_is_recommendations(table_html)
     out: list[Chunk] = []
     for row_html in _TR_RE.findall(table_html):
         text = _TAG_RE.sub(" ", row_html)
@@ -326,22 +353,33 @@ def _extract_table_row_recommendations(
         if not text:
             continue
         head = text[:200]
+
+        etype: Optional[str] = None
+        synthetic_rec_id: Optional[str] = None
         if KEY_CONCEPT_RE.search(head):
             etype = "key_concept"
         elif RECOMMENDATION_RE.search(head):
             etype = "recommendation"
-        else:
+        elif is_rec_table:
+            m = _NUMBERED_ROW_RE.match(head)
+            if m:
+                etype = "recommendation"
+                synthetic_rec_id = f"Recommendation {m.group('num')}"
+
+        if etype is None:
             continue
-        out.append(
-            Chunk(
-                text=text,
-                section_title=section_title,
-                page_start=page_number,
-                page_end=page_number,
-                token_count=count_tokens(text, tokenizer),
-                element_type=etype,
-            )
+
+        chunk = Chunk(
+            text=text,
+            section_title=section_title,
+            page_start=page_number,
+            page_end=page_number,
+            token_count=count_tokens(text, tokenizer),
+            element_type=etype,
         )
+        if synthetic_rec_id:
+            chunk.recommendation_id = synthetic_rec_id
+        out.append(chunk)
     return out
 
 

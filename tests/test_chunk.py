@@ -89,8 +89,10 @@ def test_recommendation_id_extracted():
         el("NarrativeText", rec_text, page=4),
     ]
     chunks = chunk_elements(elements, target_tokens=500, min_tokens=5)
-    assert len(chunks) == 1
-    c = chunks[0]
+    # Phase 2 splits the title (prose) from the recommendation (typed chunk).
+    rec_chunks = [c for c in chunks if c.element_type == "recommendation"]
+    assert len(rec_chunks) == 1
+    c = rec_chunks[0]
     assert c.recommendation_id is not None
     assert "3.2" in c.recommendation_id
     assert c.grade_strength == "strong"
@@ -222,3 +224,212 @@ def test_grade_strength_variants(phrase, expected_strength):
     c = Chunk(text=phrase)
     _extract_grade_metadata(c)
     assert c.grade_strength == expected_strength
+
+
+# --- #16 garbage-title filter -----------------------------------------------
+
+
+def test_single_letter_titles_do_not_open_new_sections():
+    """Vertical-margin glyph artifacts ("G U I D E L I N E S" letters) come
+    through as single-character Title elements. They must not open a new
+    section, otherwise short-chunk merging can't bridge them."""
+    elements = [
+        el("Title", "Introduction", page=1),
+        el("NarrativeText", "Body text about gastroparesis " * 30, page=1),
+        el("Title", "G", page=1),  # garbage
+        el("Title", "U", page=1),  # garbage
+        el("Title", "I", page=1),  # garbage (yes, eats Roman 'I' too)
+        el("NarrativeText", "More body text continuing the same section " * 30, page=1),
+    ]
+    chunks = chunk_elements(elements, target_tokens=500, min_tokens=10)
+    # All chunks should be tagged with section_title="Introduction" — the
+    # single-letter "Titles" must not have created new sections.
+    sections = {c.section_title for c in chunks}
+    assert sections == {"Introduction"}, f"unexpected sections: {sections}"
+
+
+def test_two_letter_uppercase_title_is_treated_as_garbage():
+    elements = [
+        el("Title", "Background", page=1),
+        el("NarrativeText", "Body text. " * 30, page=1),
+        el("Title", "AB", page=1),  # 2 uppercase letters → garbage
+        el("NarrativeText", "More body. " * 30, page=1),
+    ]
+    chunks = chunk_elements(elements, target_tokens=500, min_tokens=10)
+    sections = {c.section_title for c in chunks}
+    assert sections == {"Background"}
+
+
+def test_legitimate_short_title_is_kept():
+    """A title with punctuation or 3+ chars is real, not garbage."""
+    elements = [
+        el("Title", "I.", page=1),    # has a period
+        el("NarrativeText", "Body. " * 30, page=1),
+        el("Title", "II.", page=2),
+        el("NarrativeText", "Body 2. " * 30, page=2),
+    ]
+    chunks = chunk_elements(elements, target_tokens=500, min_tokens=10)
+    sections = {c.section_title for c in chunks}
+    assert "I." in sections and "II." in sections
+
+
+# --- #17 figure-caption filter ----------------------------------------------
+
+
+def test_real_figure_caption_kept():
+    elements = [
+        el("FigureCaption", "Figure 1. Care algorithm for Barrett's surveillance.", page=2),
+    ]
+    chunks = chunk_elements(elements, min_tokens=1)
+    assert len(chunks) == 1
+    assert chunks[0].element_type == "figure_caption"
+
+
+def test_spurious_figure_caption_demoted_to_prose():
+    """unstructured emits FigureCaption on inline icons / pull-quote graphics
+    whose text is not a real "Figure N." label. Those must not claim a
+    figure_caption slot."""
+    elements = [
+        el("FigureCaption", "Click here to view related literature.", page=2),
+        el("Image", "GUIDELINES IN PRACTICE", page=2),
+        el("FigureCaption", "Figure 3. Real caption here.", page=3),
+    ]
+    chunks = chunk_elements(elements, min_tokens=1)
+    fig_chunks = [c for c in chunks if c.element_type == "figure_caption"]
+    assert len(fig_chunks) == 1
+    assert "Figure 3" in fig_chunks[0].text
+
+
+# --- #15 table-row recommendations ------------------------------------------
+
+
+def test_table_with_recommendation_rows_emits_per_row_chunks():
+    """AGA pharma tables put recommendation text in HTML rows. Each labeled
+    row should become its own element_type='recommendation' chunk alongside
+    the parent table chunk."""
+    table_html = (
+        "<table>"
+        "<tr><th>Recommendation</th><th>Strength</th><th>Evidence</th></tr>"
+        "<tr><td>Recommendation 1: We suggest eluxadoline for IBS-D.</td>"
+        "<td>conditional recommendation</td><td>moderate-quality evidence</td></tr>"
+        "<tr><td>Recommendation 2: We suggest rifaximin for IBS-D.</td>"
+        "<td>conditional recommendation</td><td>moderate-quality evidence</td></tr>"
+        "<tr><td>Statement 4: Antispasmodics may be considered.</td>"
+        "<td>weak recommendation</td><td>low-quality evidence</td></tr>"
+        "</table>"
+    )
+    table_el = ParsedElement(
+        category="Table",
+        text="Recommendation Strength Evidence ...",
+        page_number=3,
+        table_html=table_html,
+    )
+    chunks = chunk_elements([table_el], min_tokens=1)
+    table_chunks = [c for c in chunks if c.element_type == "table"]
+    rec_chunks = [c for c in chunks if c.element_type == "recommendation"]
+    assert len(table_chunks) == 1, "parent table chunk should still exist"
+    assert len(rec_chunks) == 3, f"expected 3 row-level recs, got {len(rec_chunks)}"
+    rec_ids = {c.recommendation_id for c in rec_chunks}
+    # All three labels (Recommendation 1, Recommendation 2, Statement 4) extracted.
+    assert any("Recommendation 1" in (rid or "") for rid in rec_ids)
+    assert any("Recommendation 2" in (rid or "") for rid in rec_ids)
+    assert any("Statement 4" in (rid or "") for rid in rec_ids)
+    # GRADE metadata propagates into row chunks via the post-pass extractor.
+    strengths = {c.grade_strength for c in rec_chunks if c.grade_strength}
+    assert "conditional" in strengths and "weak" in strengths
+
+
+def test_table_without_recommendation_rows_does_not_emit_extras():
+    """A table containing data-only rows (no Recommendation/Statement labels)
+    should produce only the parent table chunk, no spurious row chunks."""
+    table_html = (
+        "<table>"
+        "<tr><th>Drug</th><th>Dose</th></tr>"
+        "<tr><td>Metoclopramide</td><td>5-10 mg</td></tr>"
+        "<tr><td>Erythromycin</td><td>50-200 mg</td></tr>"
+        "</table>"
+    )
+    table_el = ParsedElement(
+        category="Table",
+        text="Drug Dose Metoclopramide 5-10 mg ...",
+        page_number=4,
+        table_html=table_html,
+    )
+    chunks = chunk_elements([table_el], min_tokens=1)
+    table_chunks = [c for c in chunks if c.element_type == "table"]
+    rec_chunks = [c for c in chunks if c.element_type == "recommendation"]
+    assert len(table_chunks) == 1
+    assert len(rec_chunks) == 0
+
+
+def test_aga_style_numbered_row_recs_extracted():
+    """AGA pharma tables use bare-number labels ('1.', '2a.', '3.') in the
+    recommendations column, not the literal 'Recommendation N'. The
+    extractor must detect via a '<th>...recommend...</th>' header and
+    synthesize a recommendation_id for those rows."""
+    table_html = (
+        "<table>"
+        "<thead>"
+        "<tr><th>New or updated recommendations</th><th>Strength of recommendation</th>"
+        "<th>Certainty in evidence</th></tr>"
+        "</thead>"
+        "<tbody>"
+        "<tr><td>1. In patients with IBS-D, the AGA suggests using eluxadoline</td>"
+        "<td>Conditional recommendation</td><td>moderate-quality evidence</td></tr>"
+        "<tr><td>2a. In patients with IBS-D, the AGA suggests using rifaximin</td>"
+        "<td>Conditional recommendation</td><td>moderate-quality evidence</td></tr>"
+        "<tr><td>2b. In patients with IBS-D with initial response to rifaximin who develop "
+        "recurrent symptoms, the AGA suggests retreatment with rifaximin</td>"
+        "<td>Conditional recommendation</td><td>moderate-quality evidence</td></tr>"
+        "</tbody></table>"
+    )
+    table_el = ParsedElement(
+        category="Table", text="...", page_number=3, table_html=table_html,
+    )
+    chunks = chunk_elements([table_el], min_tokens=1)
+    rec_chunks = [c for c in chunks if c.element_type == "recommendation"]
+    assert len(rec_chunks) == 3, f"expected 3 numbered recs, got {len(rec_chunks)}"
+    rec_ids = {c.recommendation_id for c in rec_chunks}
+    assert "Recommendation 1" in rec_ids
+    assert "Recommendation 2a" in rec_ids
+    assert "Recommendation 2b" in rec_ids
+    # GRADE is propagated from the row text by _extract_grade_metadata.
+    assert all(c.grade_strength == "conditional" for c in rec_chunks)
+    assert all(c.grade_evidence == "moderate" for c in rec_chunks)
+
+
+def test_data_table_with_numbered_rows_does_not_emit_fake_recs():
+    """A data table whose rows happen to start with numbers but whose headers
+    don't mention 'recommendation' must NOT be parsed as recommendations."""
+    table_html = (
+        "<table>"
+        "<thead><tr><th>Study</th><th>N</th><th>Outcome</th></tr></thead>"
+        "<tbody>"
+        "<tr><td>1. Smith 2020</td><td>120</td><td>Positive</td></tr>"
+        "<tr><td>2. Jones 2021</td><td>80</td><td>Negative</td></tr>"
+        "</tbody></table>"
+    )
+    table_el = ParsedElement(
+        category="Table", text="...", page_number=5, table_html=table_html,
+    )
+    chunks = chunk_elements([table_el], min_tokens=1)
+    rec_chunks = [c for c in chunks if c.element_type == "recommendation"]
+    assert len(rec_chunks) == 0, "no recs should be extracted from a data table"
+
+
+def test_table_key_concept_rows_emit_key_concept_chunks():
+    """ACG tables sometimes embed Key Concept rows. Those should be classified
+    as element_type='key_concept' (not recommendation)."""
+    table_html = (
+        "<table>"
+        "<tr><th>Key Concepts</th></tr>"
+        "<tr><td>Key Concept 1: SELs are common incidental endoscopic findings.</td></tr>"
+        "<tr><td>Key Concept 2: EUS distinguishes layer of origin.</td></tr>"
+        "</table>"
+    )
+    table_el = ParsedElement(
+        category="Table", text="Key Concepts ...", page_number=2, table_html=table_html,
+    )
+    chunks = chunk_elements([table_el], min_tokens=1)
+    kc_chunks = [c for c in chunks if c.element_type == "key_concept"]
+    assert len(kc_chunks) == 2
