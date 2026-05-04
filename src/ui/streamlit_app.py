@@ -40,6 +40,17 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+# set_page_config MUST be the first Streamlit call, once per session.
+# When using st.navigation, calling set_page_config from inside a page
+# render function fails with StreamlitSetPageConfigMustBeFirstCommandError
+# because the navigation chrome has already rendered. So we set it here,
+# at module top, before any other Streamlit work.
+st.set_page_config(
+    page_title="GI Guidelines Assistant", layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
 # Bring repo root onto sys.path so `from src.ui.* import` works whether
 # Streamlit is launched from the repo root or anywhere else.
 import sys
@@ -181,10 +192,6 @@ def render_main_page() -> None:
     default_top_k = int(cfg.get("default_top_k", 6))
     show_debug = bool(cfg.get("show_debug_toggle", True))
     phi_enabled = bool((cfg.get("phi_check") or {}).get("enabled", True))
-
-    st.set_page_config(
-        page_title=title, layout="wide", initial_sidebar_state="expanded",
-    )
 
     render_corpus_snapshot_header(title, subtitle)
 

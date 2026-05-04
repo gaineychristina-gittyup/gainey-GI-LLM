@@ -57,7 +57,9 @@ def _corpus_stats() -> dict[str, Any]:
 
 
 def render() -> None:
-    st.set_page_config(page_title="About — GI Guidelines Assistant", layout="wide")
+    # set_page_config lives in streamlit_app.py at module top — calling it
+    # from inside a page render fails because navigation chrome has already
+    # been emitted by the time st.navigation routes to this function.
     render_corpus_snapshot_header(
         title="About this assistant",
         subtitle="Methodology, corpus composition, and limitations.",
