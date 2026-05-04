@@ -71,10 +71,26 @@ def inject_global_styles() -> None:
             --gg-cite-border: #c7d8f2;
             --gg-cite-text: #1d4ed8;
         }
-        html, body, [class*="css"] {
+        html, body, [class*="css"], [class*="st-"], button, input,
+        textarea, select, optgroup, option, label {
             font-family: "Avenir Next", "Avenir", -apple-system,
                 BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
-                Arial, sans-serif;
+                Arial, sans-serif !important;
+        }
+        /* Universal sweep — Streamlit's emotion-cache classes set
+           font-family on inner divs that the above selectors miss.
+           Force every visible text node to inherit Avenir. */
+        body * {
+            font-family: "Avenir Next", "Avenir", -apple-system,
+                BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+                Arial, sans-serif !important;
+        }
+        /* Keep monospace where it matters (inline code blocks, the
+           small "Backend: localhost:8000" indicator) so users still
+           see at a glance that something is a path or command. */
+        code, pre, kbd, samp, tt, .stCode, [class*="language-"] {
+            font-family: ui-monospace, "SF Mono", Menlo, Monaco,
+                Consolas, "Liberation Mono", monospace !important;
         }
         .block-container {
             padding-top: 3rem;
