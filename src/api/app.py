@@ -22,6 +22,8 @@ from pydantic import BaseModel, Field
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # Must run BEFORE importing the answer/retrieve modules — those grab
 # ANTHROPIC_API_KEY / VOYAGE_API_KEY / COHERE_API_KEY at first call.
+from src._env import clear_empty_creds  # noqa: E402
+clear_empty_creds()
 load_dotenv(REPO_ROOT / ".env")
 
 from src.api import history  # noqa: E402

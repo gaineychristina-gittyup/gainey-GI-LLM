@@ -32,6 +32,8 @@ from dotenv import load_dotenv
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from src._env import clear_empty_creds  # noqa: E402
+
 
 def _csv_list(s: str | None) -> list[str] | None:
     if not s:
@@ -63,6 +65,7 @@ def _format_citation(c: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    clear_empty_creds()
     load_dotenv()
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,

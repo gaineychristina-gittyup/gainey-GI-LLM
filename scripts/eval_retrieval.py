@@ -35,6 +35,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 DEFAULT_QUESTIONS = REPO_ROOT / "tests" / "eval" / "questions.yaml"
 
+from src._env import clear_empty_creds  # noqa: E402
+
 
 def evaluate_retrieval(q: dict, rows: list[dict]) -> dict:
     """Score a single question's retrieval-only result."""
@@ -96,6 +98,7 @@ def evaluate_answer(q: dict, out: dict) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    clear_empty_creds()
     load_dotenv(REPO_ROOT / ".env")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--questions", type=Path, default=DEFAULT_QUESTIONS)

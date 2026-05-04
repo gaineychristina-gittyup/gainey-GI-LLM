@@ -241,6 +241,8 @@ def get_db_connection() -> psycopg.Connection:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from src._env import clear_empty_creds
+    clear_empty_creds()
     load_dotenv()
     parser = argparse.ArgumentParser(description="Build the GI guidelines RAG index.")
     src = parser.add_mutually_exclusive_group(required=True)
