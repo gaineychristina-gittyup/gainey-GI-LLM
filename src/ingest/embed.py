@@ -187,6 +187,9 @@ def embed_and_insert_chunks(
                 c.text,
                 emb,
                 c.token_count,
+                c.element_type,
+                c.table_html,
+                c.figure_image_path,
             )
             for c, emb in zip(batch, embeddings)
         ]
@@ -198,8 +201,9 @@ def embed_and_insert_chunks(
                 INSERT INTO chunks (
                     document_id, section_title, recommendation_id,
                     grade_evidence, grade_strength,
-                    page_start, page_end, text, embedding, token_count
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    page_start, page_end, text, embedding, token_count,
+                    element_type, table_html, figure_image_path
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT DO NOTHING
                 """,
                 rows,

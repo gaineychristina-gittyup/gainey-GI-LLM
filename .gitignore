@@ -20,9 +20,10 @@ env/
 .env
 .env.local
 
-# Data — never commit raw PDFs or parsed artifacts
+# Data — never commit raw PDFs, parsed artifacts, or ingest logs
 data/raw_pdfs/
 data/parsed/
+data/logs/
 
 # OS
 .DS_Store

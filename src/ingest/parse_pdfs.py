@@ -29,12 +29,23 @@ class ParsedElement:
     The chunker downstream consumes these. We keep the unstructured category
     (``Title``, ``NarrativeText``, ``ListItem``, ``Table``) because section-aware
     chunking keys off ``Title`` boundaries.
+
+    For ``Table`` elements, ``table_html`` carries the structured HTML
+    representation that ``unstructured`` produces when
+    ``infer_table_structure=True``. We embed the plain-text rendering but
+    keep the HTML so the UI can re-render structured tables later.
+
+    For ``FigureCaption`` / ``Image`` elements, ``bbox`` carries the
+    page-coordinate rectangle (x0, y0, x1, y1) used by
+    :mod:`src.ingest.extract_figures` to crop the figure region into a PNG.
     """
 
     category: str          # unstructured element category, e.g. "Title", "NarrativeText"
     text: str
     page_number: Optional[int] = None
     metadata: dict = field(default_factory=dict)
+    table_html: Optional[str] = None        # populated when category == "Table"
+    bbox: Optional[tuple[float, float, float, float]] = None  # x0,y0,x1,y1 (PDF coords)
 
 
 def _parse_with_strategy(pdf_path: str, strategy: str, infer_tables: bool) -> list:
@@ -73,28 +84,93 @@ def parse_pdf(
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
-    elements = _try_parse_with_timeout(
-        str(pdf_path), strategy, infer_table_structure, fallback_after_seconds
-    )
+    # The subprocess-based timeout (``_try_parse_with_timeout``) is opt-in via
+    # the env var ``GI_PARSE_USE_TIMEOUT_SUBPROCESS=1``. By default we call
+    # unstructured directly because on macOS the spawn child reliably hangs in
+    # table-transformer inference on PDFs that the SAME code parses fine in the
+    # main process (~30s). When build_index runs with --workers > 1 the pool
+    # worker IS already a subprocess, so a second-level subprocess would just
+    # nest hangs without adding safety.
+    import os
+    if os.environ.get("GI_PARSE_USE_TIMEOUT_SUBPROCESS") == "1":
+        elements = _try_parse_with_timeout(
+            str(pdf_path), strategy, infer_table_structure, fallback_after_seconds
+        )
+    else:
+        try:
+            elements = _parse_with_strategy(str(pdf_path), strategy, infer_table_structure)
+        except Exception as e:
+            logger.warning("hi_res failed (%r) — falling back to fast", e)
+            elements = _parse_with_strategy(str(pdf_path), "fast", infer_table_structure)
 
     parsed: list[ParsedElement] = []
     for el in elements:
         # element.category is set by unstructured; element.metadata has page numbers, etc.
         meta = getattr(el, "metadata", None)
         meta_dict = meta.to_dict() if meta is not None else {}
+        category = getattr(el, "category", el.__class__.__name__)
         parsed.append(
             ParsedElement(
-                category=getattr(el, "category", el.__class__.__name__),
+                category=category,
                 text=str(el).strip(),
                 page_number=meta_dict.get("page_number"),
                 metadata=meta_dict,
+                table_html=meta_dict.get("text_as_html") if category == "Table" else None,
+                bbox=_extract_bbox(meta_dict),
             )
         )
 
     # Drop empties (unstructured occasionally emits whitespace-only elements).
-    parsed = [p for p in parsed if p.text]
+    # Tables can be empty-text-but-HTML-only — keep those.
+    parsed = [p for p in parsed if p.text or p.table_html]
     logger.info("Parsed %s into %d elements", pdf_path.name, len(parsed))
     return parsed
+
+
+def _extract_bbox(meta_dict: dict) -> Optional[tuple[float, float, float, float]]:
+    """Pull (x0, y0, x1, y1) in PDF points from unstructured's coordinates dict.
+
+    unstructured stores coordinates as a list of (x, y) corner tuples in
+    page-local pixel space, with a ``layout_width`` / ``layout_height`` that
+    we ignore here — :mod:`src.ingest.extract_figures` re-projects from the
+    layout coords onto the actual PDF page when cropping.
+    """
+    coords = meta_dict.get("coordinates")
+    if not coords:
+        return None
+    pts = coords.get("points")
+    if not pts:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _run_in_subprocess(conn, pdf_path: str, strategy: str, infer_tables: bool):  # pragma: no cover — child
+    # Module-level so the spawn context can pickle and re-import it.
+    #
+    # Single-thread torch / OpenMP / MKL inside the child. The spawn child
+    # ends up deadlocking on macOS during table-transformer inference when
+    # these default to multi-threaded — empirically we hit a >10 min hang
+    # on PDFs that the SAME code parses in ~30s in the main process.
+    import os
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    try:
+        import torch  # noqa: F401  — set thread count if torch is available
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+    try:
+        result = _parse_with_strategy(pdf_path, strategy, infer_tables)
+        conn.send(("ok", result))
+    except Exception as e:
+        conn.send(("err", repr(e)))
+    finally:
+        conn.close()
 
 
 def _try_parse_with_timeout(
@@ -112,16 +188,10 @@ def _try_parse_with_timeout(
     ctx = mp.get_context("spawn")
     parent_conn, child_conn = ctx.Pipe()
 
-    def _run(conn):  # pragma: no cover — runs in child
-        try:
-            result = _parse_with_strategy(pdf_path, strategy, infer_tables)
-            conn.send(("ok", result))
-        except Exception as e:
-            conn.send(("err", repr(e)))
-        finally:
-            conn.close()
-
-    proc = ctx.Process(target=_run, args=(child_conn,))
+    proc = ctx.Process(
+        target=_run_in_subprocess,
+        args=(child_conn, pdf_path, strategy, infer_tables),
+    )
     proc.start()
     proc.join(timeout=timeout_s)
 

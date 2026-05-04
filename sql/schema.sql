@@ -28,8 +28,18 @@ CREATE TABLE IF NOT EXISTS chunks (
     page_end           INT,
     text               TEXT NOT NULL,
     embedding          vector(1024),
-    token_count        INT
+    token_count        INT,
+    -- Phase 2: typed chunks (prose / table / figure_caption / recommendation / key_concept).
+    -- 'text' is the embedded representation in every case; element-specific payloads below.
+    element_type       TEXT,                -- 'prose'|'table'|'figure_caption'|'recommendation'|'key_concept'
+    table_html         TEXT,                -- structured HTML; populated when element_type='table'
+    figure_image_path  TEXT                 -- relative path to extracted PNG; populated when element_type='figure_caption'
 );
+
+-- Idempotent column adds for envs created before Phase 2 extension.
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS element_type      TEXT;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS table_html        TEXT;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS figure_image_path TEXT;
 
 -- Dense semantic retrieval (HNSW with cosine distance).
 CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw

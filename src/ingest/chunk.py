@@ -5,24 +5,37 @@ Chunking rules (in plain English so they're easy to tune):
   1. Walk the parsed elements in document order. ``Title`` elements start a new
      section. Everything until the next ``Title`` belongs to that section.
 
-  2. Within a section, accumulate text until we hit ~``target_tokens``. When the
-     accumulator goes over, flush a chunk and start the next one with an
-     overlap window of ``overlap_tokens`` tokens (so context bleeds across
-     boundaries — important for retrieval).
+  2. Within a section, accumulate prose text until we hit ~``target_tokens``.
+     When the accumulator goes over, flush a prose chunk and start the next one
+     with an overlap window of ``overlap_tokens`` tokens (so context bleeds
+     across boundaries — important for retrieval).
 
-  3. We never split inside a recommendation block. A "recommendation block"
-     is detected by ``RECOMMENDATION_RE`` — patterns like ``Recommendation 3.2``
-     or ``Statement 4`` or a ListItem starting with a GRADE phrase. If a
-     recommendation block would push us past ``max_tokens``, we flush the
-     in-progress chunk *first*, then emit the recommendation as its own chunk.
+  3. **Typed chunks are never merged with prose.** Tables, figure captions,
+     recommendations, and key concepts each become standalone chunks regardless
+     of length. They carry an ``element_type`` field on the Chunk so the UI and
+     retrieval layer can render or filter them differently.
+
+       - element_type='table': one chunk per Table element. ``table_html``
+         carries unstructured's HTML rendering; ``text`` is the plain-text
+         flattening (which is what we embed).
+       - element_type='figure_caption': one chunk per FigureCaption element.
+         ``figure_image_path`` is set later by build_index.py once the figure
+         crop is materialized to disk.
+       - element_type='recommendation': one chunk per element that matches
+         RECOMMENDATION_RE (Recommendation N, Statement N, BPA N, Quality
+         Indicator N).
+       - element_type='key_concept': one chunk per element that matches
+         KEY_CONCEPT_RE (ACG-style "Key Concept N" labels).
+       - element_type='prose': everything else.
 
   4. We never split mid-sentence. The forced-split path (when a section is
-     longer than ``max_tokens`` and has no recommendation boundaries) walks
-     back to the most recent sentence terminator before flushing.
+     longer than ``max_tokens``) walks back to the most recent sentence
+     terminator before flushing.
 
-  5. After all chunks are produced, any chunk shorter than ``min_tokens`` is
-     merged with its previous neighbor — short orphan chunks (titles by
-     themselves, single bullet points) hurt retrieval quality.
+  5. After all chunks are produced, any *prose* chunk shorter than ``min_tokens``
+     is merged with its previous prose neighbor in the same section. Typed
+     chunks (table / figure_caption / recommendation / key_concept) are kept
+     even when short — they're high-signal and per spec must not be merged.
 
   6. For each chunk, we extract:
        - ``recommendation_id`` (e.g. "Recommendation 3.2", "Statement 4")
@@ -60,6 +73,14 @@ RECOMMENDATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ACG-style "Key Concept N" labels. ACG guidelines pair their numbered
+# Recommendations (which carry GRADE) with Key Concepts (which don't), so we
+# track them separately even though they look like recommendations textually.
+KEY_CONCEPT_RE = re.compile(
+    r"\b(?P<id>Key\s+Concept\s*\d+(?:\.\d+)?[A-Za-z]?)\b",
+    re.IGNORECASE,
+)
+
 # GRADE strength: "strong" or "conditional"/"weak" recommendation.
 GRADE_STRENGTH_RE = re.compile(
     r"\b(?P<strength>strong|conditional|weak)\s+recommendation\b",
@@ -86,6 +107,12 @@ class Chunk:
     page_start: Optional[int] = None
     page_end: Optional[int] = None
     token_count: int = 0
+    # Phase 2: typed chunks
+    element_type: str = "prose"   # 'prose'|'table'|'figure_caption'|'recommendation'|'key_concept'
+    table_html: Optional[str] = None          # only for element_type='table'
+    figure_image_path: Optional[str] = None   # only for element_type='figure_caption'
+    figure_bbox: Optional[tuple[float, float, float, float]] = None  # passthrough for cropper
+    figure_layout_size: Optional[tuple[float, float]] = None         # (layout_w, layout_h)
     metadata: dict = field(default_factory=dict)
 
 
@@ -206,15 +233,49 @@ def _group_into_sections(
     return sections
 
 
-def _is_recommendation_block(elem: ParsedElement) -> bool:
-    """Heuristic: does this element start a recommendation we shouldn't split?"""
+def _classify_element(elem: ParsedElement) -> str:
+    """Return one of 'table'|'figure_caption'|'recommendation'|'key_concept'|'prose'.
+
+    Order matters: a table-of-recommendations is a Table element first; a
+    Key Concept block is detected before Recommendation because some societies
+    (notably ACG) put both kinds of labeled blocks side-by-side.
+    """
+    if elem.category == "Table":
+        return "table"
+    if elem.category in ("FigureCaption", "Image"):
+        return "figure_caption"
     head = elem.text[:200]
+    if KEY_CONCEPT_RE.search(head):
+        return "key_concept"
     if RECOMMENDATION_RE.search(head):
-        return True
-    # ListItems that lead with GRADE phrasing also count.
+        return "recommendation"
     if elem.category == "ListItem" and GRADE_STRENGTH_RE.search(head):
-        return True
-    return False
+        return "recommendation"
+    return "prose"
+
+
+def _table_to_plain_text(html: Optional[str], fallback_text: str) -> str:
+    """Render an unstructured Table HTML payload to plain text for embedding.
+
+    The fallback is the element's own ``str(...)`` text. We try a tiny HTML
+    flattener first because unstructured's str(Table) is sometimes a flat
+    space-joined run that mangles row boundaries.
+    """
+    if not html:
+        return fallback_text.strip()
+    # Inject row/cell separators before stripping tags so the embedded text
+    # preserves cell boundaries — important for retrieval over tables.
+    cleaned = (
+        html.replace("</tr>", "</tr>\n")
+        .replace("</td>", " | </td>")
+        .replace("</th>", " | </th>")
+    )
+    text = re.sub(r"<[^>]+>", "", cleaned)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    # Trim trailing " | " left over from the last cell on each row.
+    text = re.sub(r"\s*\|\s*$", "", text, flags=re.MULTILINE)
+    return text or fallback_text.strip()
 
 
 def _chunk_section(
@@ -225,29 +286,34 @@ def _chunk_section(
     overlap_tokens: int,
     tokenizer: str,
 ) -> list[Chunk]:
-    """Chunk a single section into one or more Chunks."""
+    """Chunk a single section. Typed elements emit their own standalone chunks;
+    prose accumulates into windowed prose chunks with overlap between them.
+    """
     chunks: list[Chunk] = []
 
     buf_texts: list[str] = []
     buf_tokens = 0
     buf_pages: list[int] = []
 
-    def flush() -> Optional[Chunk]:
+    def flush_prose() -> None:
+        """Flush the accumulated prose buffer as one element_type='prose' chunk."""
         nonlocal buf_texts, buf_tokens, buf_pages
         if not buf_texts:
-            return None
+            return
         text = "\n\n".join(buf_texts).strip()
         if not text:
             buf_texts, buf_tokens, buf_pages = [], 0, []
-            return None
-        chunk = Chunk(
-            text=text,
-            section_title=section_title,
-            page_start=min(buf_pages) if buf_pages else None,
-            page_end=max(buf_pages) if buf_pages else None,
-            token_count=count_tokens(text, tokenizer),
+            return
+        chunks.append(
+            Chunk(
+                text=text,
+                section_title=section_title,
+                page_start=min(buf_pages) if buf_pages else None,
+                page_end=max(buf_pages) if buf_pages else None,
+                token_count=count_tokens(text, tokenizer),
+                element_type="prose",
+            )
         )
-        chunks.append(chunk)
         # Reset with overlap from tail of just-flushed text.
         if overlap_tokens > 0:
             tail = _tail_by_tokens(text, overlap_tokens, tokenizer)
@@ -256,62 +322,96 @@ def _chunk_section(
         else:
             buf_texts, buf_tokens = [], 0
         buf_pages = []
-        return chunk
 
     for el in section_elems:
-        el_tokens = count_tokens(el.text, tokenizer)
-        is_rec = _is_recommendation_block(el)
+        kind = _classify_element(el)
 
-        # If this is a recommendation that would overflow, flush first so the
-        # recommendation lives in its own chunk (or its own pair of chunks if
-        # it's >max_tokens by itself).
-        if is_rec and (buf_tokens + el_tokens > target_tokens) and buf_tokens > 0:
-            flush()
-
-        # Recommendation blocks that fit go straight in.
-        if is_rec and el_tokens <= max_tokens:
-            buf_texts.append(el.text)
-            buf_tokens += el_tokens
-            if el.page_number is not None:
-                buf_pages.append(el.page_number)
-            # After a recommendation, flush so it's the dominant content of
-            # its chunk; the next element starts fresh (with overlap).
-            if buf_tokens >= target_tokens:
-                flush()
+        # Typed elements always interrupt prose accumulation and emit their own
+        # standalone chunk (or pair of chunks for over-long recommendations).
+        if kind == "table":
+            flush_prose()
+            text_for_embedding = _table_to_plain_text(el.table_html, el.text)
+            chunks.append(
+                Chunk(
+                    text=text_for_embedding,
+                    section_title=section_title,
+                    page_start=el.page_number,
+                    page_end=el.page_number,
+                    token_count=count_tokens(text_for_embedding, tokenizer),
+                    element_type="table",
+                    table_html=el.table_html,
+                )
+            )
             continue
 
-        # Recommendation blocks longer than max_tokens are split on sentence
-        # boundaries but kept as their own chunks (no merging with neighbors).
-        if is_rec and el_tokens > max_tokens:
-            if buf_texts:
-                flush()
-            for piece in _split_long_text(el.text, target_tokens, max_tokens, tokenizer):
+        if kind == "figure_caption":
+            flush_prose()
+            layout = el.metadata.get("coordinates", {}) or {}
+            layout_size = None
+            lw, lh = layout.get("layout_width"), layout.get("layout_height")
+            if lw and lh:
+                layout_size = (float(lw), float(lh))
+            chunks.append(
+                Chunk(
+                    text=el.text,
+                    section_title=section_title,
+                    page_start=el.page_number,
+                    page_end=el.page_number,
+                    token_count=count_tokens(el.text, tokenizer),
+                    element_type="figure_caption",
+                    figure_bbox=el.bbox,
+                    figure_layout_size=layout_size,
+                )
+            )
+            continue
+
+        if kind in ("recommendation", "key_concept"):
+            flush_prose()
+            el_tokens = count_tokens(el.text, tokenizer)
+            if el_tokens <= max_tokens:
                 chunks.append(
                     Chunk(
-                        text=piece,
+                        text=el.text,
                         section_title=section_title,
                         page_start=el.page_number,
                         page_end=el.page_number,
-                        token_count=count_tokens(piece, tokenizer),
+                        token_count=el_tokens,
+                        element_type=kind,
                     )
                 )
+            else:
+                # Long recommendations split on sentence boundaries; each piece
+                # keeps element_type so it isn't merged with neighbors later.
+                for piece in _split_long_text(el.text, target_tokens, max_tokens, tokenizer):
+                    chunks.append(
+                        Chunk(
+                            text=piece,
+                            section_title=section_title,
+                            page_start=el.page_number,
+                            page_end=el.page_number,
+                            token_count=count_tokens(piece, tokenizer),
+                            element_type=kind,
+                        )
+                    )
             continue
 
-        # Regular element: would adding it overflow?
-        if buf_tokens + el_tokens > max_tokens and buf_texts:
-            flush()
+        # ---- prose path ----
+        el_tokens = count_tokens(el.text, tokenizer)
 
-        # If this single element is itself larger than max_tokens, split it.
+        # Would adding this element overflow?
+        if buf_tokens + el_tokens > max_tokens and buf_texts:
+            flush_prose()
+
         if el_tokens > max_tokens:
             if buf_texts:
-                flush()
+                flush_prose()
             for piece in _split_long_text(el.text, target_tokens, max_tokens, tokenizer):
                 buf_texts.append(piece)
                 buf_tokens += count_tokens(piece, tokenizer)
                 if el.page_number is not None:
                     buf_pages.append(el.page_number)
                 if buf_tokens >= target_tokens:
-                    flush()
+                    flush_prose()
             continue
 
         buf_texts.append(el.text)
@@ -320,9 +420,9 @@ def _chunk_section(
             buf_pages.append(el.page_number)
 
         if buf_tokens >= target_tokens:
-            flush()
+            flush_prose()
 
-    flush()
+    flush_prose()
     return chunks
 
 
@@ -376,26 +476,30 @@ def _tail_by_tokens(text: str, n_tokens: int, tokenizer: str) -> str:
 def _merge_short_chunks(
     chunks: list[Chunk], min_tokens: int, tokenizer: str
 ) -> list[Chunk]:
-    """Merge any chunk shorter than min_tokens into a same-section neighbor.
+    """Merge any short *prose* chunk into a same-section prose neighbor.
 
-    Pass 1 (backward): for each non-first chunk, if it's short, merge into the
-    previous chunk (preferred direction so context flows forward).
-    Pass 2 (forward): if the FIRST chunk is short (typically a lone Title),
-    merge it forward into the next chunk in the same section.
+    Pass 1 (backward): for each non-first prose chunk, if it's short, merge
+    into the previous prose chunk (preferred direction so context flows
+    forward).
+    Pass 2 (forward): if the FIRST chunk is a short prose chunk (typically a
+    lone Title), merge it forward into the next prose chunk in the same
+    section.
 
-    Recommendation chunks are kept even when short — they're high-signal.
+    Typed chunks (table / figure_caption / recommendation / key_concept) are
+    NEVER merged — per Phase 2 spec, those stand alone regardless of length.
     """
     if not chunks:
         return chunks
     merged: list[Chunk] = [chunks[0]]
     for c in chunks[1:]:
         prev = merged[-1]
-        is_rec = bool(RECOMMENDATION_RE.search(c.text[:200]))
         same_section = c.section_title == prev.section_title
+        # Both must be prose for a merge — protects all typed chunks in either slot.
+        both_prose = c.element_type == "prose" and prev.element_type == "prose"
         if (
             c.token_count < min_tokens
             and same_section
-            and not is_rec
+            and both_prose
         ):
             prev.text = prev.text.rstrip() + "\n\n" + c.text.lstrip()
             prev.token_count = count_tokens(prev.text, tokenizer)
@@ -406,18 +510,22 @@ def _merge_short_chunks(
         else:
             merged.append(c)
 
-    # Pass 2: leading-orphan handling.
-    if len(merged) >= 2 and merged[0].token_count < min_tokens:
+    # Pass 2: leading-orphan handling — only when both first and second are prose.
+    if (
+        len(merged) >= 2
+        and merged[0].element_type == "prose"
+        and merged[1].element_type == "prose"
+        and merged[0].token_count < min_tokens
+        and merged[0].section_title == merged[1].section_title
+    ):
         first, second = merged[0], merged[1]
-        is_first_rec = bool(RECOMMENDATION_RE.search(first.text[:200]))
-        if first.section_title == second.section_title and not is_first_rec:
-            second.text = first.text.rstrip() + "\n\n" + second.text.lstrip()
-            second.token_count = count_tokens(second.text, tokenizer)
-            if first.page_start is not None:
-                second.page_start = min(
-                    first.page_start, second.page_start or first.page_start
-                )
-            merged = merged[1:]
+        second.text = first.text.rstrip() + "\n\n" + second.text.lstrip()
+        second.token_count = count_tokens(second.text, tokenizer)
+        if first.page_start is not None:
+            second.page_start = min(
+                first.page_start, second.page_start or first.page_start
+            )
+        merged = merged[1:]
 
     return merged
 
