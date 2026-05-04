@@ -276,8 +276,15 @@ def render_passage_card(
     with st.expander("Show source passage", expanded=was_cited):
         et = chunk.get("element_type") or "prose"
         if et == "table" and chunk.get("table_html"):
-            st.markdown(chunk["table_html"], unsafe_allow_html=True)
-            with st.expander("Plain-text rendering (what was embedded)"):
+            # Streamlit forbids nested expanders, so we use tabs instead to
+            # offer both the rendered HTML view and the plain-text view (what
+            # the embedder actually saw).
+            tab_render, tab_plain = st.tabs(
+                ["Rendered table", "Plain-text (what was embedded)"]
+            )
+            with tab_render:
+                st.markdown(chunk["table_html"], unsafe_allow_html=True)
+            with tab_plain:
                 st.text(chunk.get("text") or "")
         elif et == "figure_caption" and chunk.get("figure_image_path"):
             rel = chunk["figure_image_path"]
