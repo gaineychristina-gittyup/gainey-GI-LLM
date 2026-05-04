@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 
 from src.generate.prompt import SYSTEM_PROMPT, build_user_message
+from src.generate.verify import verify_answer
 from src.retrieve import retrieve
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,8 @@ def answer(
         "cache_read_input_tokens": getattr(resp.usage, "cache_read_input_tokens", 0),
     }
 
+    verification = verify_answer(text, chunks)
+
     return {
         "answer": text,
         "chunks": chunks,
@@ -126,6 +129,7 @@ def answer(
         "model": model,
         "usage": usage,
         "refused": refused,
+        "verification": verification,
     }
 
 

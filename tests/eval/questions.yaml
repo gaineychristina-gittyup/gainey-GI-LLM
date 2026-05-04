@@ -1,0 +1,158 @@
+# Hand-curated questions for scripts/eval_retrieval.py.
+#
+# Each entry:
+#   id: short slug, used in output
+#   question: the natural-language clinical question
+#   in_corpus: true | false  -- when false, the system should refuse cleanly
+#   expect_society: list of societies whose chunks should appear in top-6
+#                   (the eval is satisfied if any one is hit)
+#   expect_year_min: lower bound on publication year for in-corpus answers
+#   expect_recommendation_id: substring that should appear in any cited
+#                             recommendation_id (optional)
+#   expect_element_types: element types that must appear in top-6 (any-of)
+#   notes: free-form
+
+- id: barretts_lgd_surveillance
+  question: "What's the recommended endoscopic surveillance interval for low-grade dysplasia in Barrett's esophagus, and what's the GRADE?"
+  in_corpus: true
+  expect_society: [ACG]
+  expect_year_min: 2022
+  expect_element_types: [recommendation, table]
+  notes: "Canonical test for typed-floor — table chunk is the actual answer."
+
+- id: gastroparesis_first_line
+  question: "What's the first-line pharmacologic treatment for diabetic gastroparesis, and do AGA and ACG agree?"
+  in_corpus: true
+  expect_society: [AGA, ACG]
+  expect_year_min: 2022
+  expect_element_types: [recommendation, table]
+  notes: "Cross-society — society-typed floor must surface ACG recs table."
+
+- id: hpylori_pcn_allergy
+  question: "What's the recommended H. pylori regimen for a penicillin-allergic patient?"
+  in_corpus: true
+  expect_society: [ACG]
+  expect_year_min: 2024
+  expect_element_types: [table]
+  notes: "Only Highlights doc in corpus — answer should explicitly note that the full guideline is unavailable; refuse=True is acceptable."
+
+- id: ibsd_first_line
+  question: "What pharmacologic options are recommended for IBS-D, and which carries the strongest GRADE?"
+  in_corpus: true
+  expect_society: [ACG, AGA]
+  expect_year_min: 2021
+  expect_recommendation_id: "Recommendation"
+  expect_element_types: [recommendation]
+  notes: "ACG 2021 IBS guideline carries a STRONG rec for rifaximin."
+
+- id: sel_differential
+  question: "What's the differential diagnosis of a gastric subepithelial lesion?"
+  in_corpus: true
+  expect_society: [ACG]
+  expect_year_min: 2023
+  expect_element_types: [table]
+  notes: "Table 1 of ACG SEL guideline."
+
+- id: hcc_screening_cirrhosis
+  question: "How should I screen patients with cirrhosis for hepatocellular carcinoma?"
+  in_corpus: true
+  expect_society: [AASLD, ACG]
+  expect_year_min: 2023
+  expect_element_types: [table, recommendation]
+  notes: "AASLD HCC guidance is the primary source; ACG ALD also references."
+
+- id: ulcerative_colitis_biologics
+  question: "What does AGA recommend as first-line biologic therapy for moderate-to-severe ulcerative colitis?"
+  in_corpus: true
+  expect_society: [AGA]
+  expect_year_min: 2024
+  expect_element_types: [recommendation]
+  notes: "AGA Living UC-Pharm guideline."
+
+- id: ercp_pep_prophylaxis
+  question: "What does ASGE recommend for prevention of post-ERCP pancreatitis in high-risk patients?"
+  in_corpus: true
+  expect_society: [ASGE]
+  expect_year_min: 2023
+  expect_element_types: [recommendation]
+  notes: "ASGE 2023 PEP prevention — strong recs for rectal NSAIDs / wire-guided cannulation."
+
+- id: hbv_treatment
+  question: "What's the recommended treatment for chronic hepatitis B in a patient with cirrhosis?"
+  in_corpus: true
+  expect_society: [AASLD]
+  expect_year_min: 2025
+  expect_element_types: [recommendation, table]
+
+- id: ascites_paracentesis
+  question: "When is large-volume paracentesis indicated and is albumin replacement required?"
+  in_corpus: true
+  expect_society: [AASLD]
+  expect_year_min: 2021
+  notes: "Ascites/SBP/HRS 2021 guidance."
+
+- id: lower_gi_bleeding_workup
+  question: "How should I evaluate acute lower GI bleeding?"
+  in_corpus: true
+  expect_society: [ACG]
+  expect_year_min: 2023
+  expect_element_types: [recommendation]
+
+- id: acute_pancreatitis_severity
+  question: "How do I assess severity in acute pancreatitis at presentation?"
+  in_corpus: true
+  expect_society: [ACG]
+  expect_year_min: 2024
+  expect_element_types: [recommendation]
+
+- id: cdiff_recurrent_treatment
+  question: "What's the recommended treatment for recurrent C. difficile infection?"
+  in_corpus: true
+  expect_society: [ACG, AGA]
+  expect_year_min: 2021
+  expect_element_types: [recommendation]
+
+- id: colonoscopy_adenoma_detection
+  question: "What is the minimum acceptable adenoma detection rate for screening colonoscopy?"
+  in_corpus: true
+  expect_society: [ASGE]
+  expect_year_min: 2024
+  expect_element_types: [recommendation, table]
+
+- id: gerd_ppi_chronic_use
+  question: "What does ACG say about long-term PPI use for GERD?"
+  in_corpus: true
+  expect_society: [ACG]
+  expect_year_min: 2022
+  expect_element_types: [recommendation]
+
+- id: aih_immunosuppression
+  question: "What is the standard immunosuppression regimen for autoimmune hepatitis?"
+  in_corpus: true
+  expect_society: [AASLD]
+  expect_year_min: 2020
+  expect_element_types: [recommendation]
+
+- id: portal_hypertension_screening
+  question: "When should I screen patients with cirrhosis for esophageal varices?"
+  in_corpus: true
+  expect_society: [AASLD]
+  expect_year_min: 2024
+  expect_element_types: [recommendation, table]
+
+# --- intentionally out-of-corpus -------------------------------------------
+
+- id: ercp_anesthesia_pregnancy
+  question: "What's the optimal anesthesia regimen for ERCP in pregnancy?"
+  in_corpus: false
+  notes: "Periprocedural anesthesia for pregnant patients isn't in the corpus — model should refuse cleanly."
+
+- id: dietary_recommendations_celiac_pregnancy
+  question: "What are the dietary recommendations for a pregnant patient with celiac disease and gestational diabetes?"
+  in_corpus: false
+  notes: "Compound out-of-scope question — corpus has celiac but not pregnancy nutrition."
+
+- id: pediatric_eoe_dosing
+  question: "What's the recommended swallowed corticosteroid dosing for eosinophilic esophagitis in a 10-year-old?"
+  in_corpus: false
+  notes: "Pediatric EoE is not in our corpus."

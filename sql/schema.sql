@@ -58,3 +58,29 @@ CREATE INDEX IF NOT EXISTS chunks_text_fts_idx
 -- is the natural key we de-dupe on in src/ingest/embed.py.
 CREATE UNIQUE INDEX IF NOT EXISTS chunks_idempotent_idx
     ON chunks (document_id, COALESCE(section_title, ''), COALESCE(page_start, 0), md5(text));
+
+
+-- Phase 4: conversation history. The Streamlit UI persists each turn so the
+-- user can scroll back and so we can wire follow-up-aware answers later.
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id          SERIAL PRIMARY KEY,
+    started_at  TIMESTAMPTZ DEFAULT NOW(),
+    title       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS conversation_turns (
+    id              SERIAL PRIMARY KEY,
+    conversation_id INT REFERENCES conversations(id) ON DELETE CASCADE,
+    turn_index      INT NOT NULL,
+    question        TEXT NOT NULL,
+    answer          TEXT NOT NULL,
+    citations       JSONB,
+    usage           JSONB,
+    verification    JSONB,
+    refused         BOOLEAN DEFAULT FALSE,
+    asked_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS conversation_turns_conv_idx
+    ON conversation_turns (conversation_id, turn_index);

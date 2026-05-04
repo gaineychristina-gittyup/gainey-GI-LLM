@@ -24,5 +24,7 @@ The system prompt is cache-controlled so repeated calls re-use the same
 from __future__ import annotations
 
 from src.generate.answer import answer
+from src.generate.stream import answer_stream
+from src.generate.verify import verify_answer
 
-__all__ = ["answer"]
+__all__ = ["answer", "answer_stream", "verify_answer"]
