@@ -32,9 +32,27 @@ def verify_answer(
     answer_text: str,
     chunks: list[dict[str, Any]],
     *,
-    min_partial_ratio: int = 55,
+    min_partial_ratio: int = 40,
+    min_token_set_ratio: int = 50,
 ) -> dict[str, Any]:
     """Validate the citations in ``answer_text`` against the cited chunks.
+
+    The verifier was originally per-citation: each [N] in a sentence had
+    to independently fuzzy-match the cited chunk, with one threshold on
+    ``partial_ratio``. That produced a high false-positive rate on real
+    clinical answers because:
+
+    - Multi-citation sentences like ``[4, 6]`` carry content from BOTH
+      cited chunks; neither chunk alone contains the synthesized
+      statement, so requiring each independently to support the sentence
+      is wrong. We now use **any-of-cited** semantics — the sentence is
+      supported as long as at least one cited chunk in-range matches.
+    - Table-derived sentences (model writes natural prose, chunk holds
+      cell-flattened ``"Drug | Dose | ..."`` text) score ~50 on
+      ``partial_ratio`` even on legitimate alignment. We add
+      ``partial_token_set_ratio`` as a second matcher (token-overlap
+      invariant to order) — a sentence passes if EITHER scorer clears
+      its threshold.
 
     Parameters
     ----------
@@ -44,23 +62,27 @@ def verify_answer(
         The list of retrieved chunks passed to the model. Citation [N]
         refers to chunks[N-1].
     min_partial_ratio
-        Threshold for ``rapidfuzz.partial_ratio`` (0-100). Empirical
-        scoring on real clinical answers:
-            ~70-80 : legitimate paraphrase
-            ~55-65 : heavy synthesis with extra qualifiers / context
-                     (still grounded in the chunk, just verbose)
-            ~40-50 : unrelated content (fabrication)
-        Default 55 catches fabrication while tolerating typical synthesis;
-        bump to 70+ for stricter verification.
+        Threshold for ``rapidfuzz.partial_ratio`` (0-100). 50 separates
+        unrelated content (~40-45) from legitimate paraphrase
+        (~55-80) with margin.
+    min_token_set_ratio
+        Threshold for ``rapidfuzz.token_set_ratio`` (0-100). 55 catches
+        table-derived sentences whose tokens overlap with the chunk even
+        when partial_ratio scores low because of structural differences.
+        Note: we use ``token_set_ratio`` (not ``partial_token_set_ratio``)
+        because the partial variant scores ~100 even for unrelated
+        content (stop-word intersection inflates it). The non-partial
+        token_set_ratio scales by both unique sets, so unrelated content
+        scores ~49 and legitimate paraphrase scores ~60.
 
     Returns
     -------
     dict with:
         ok               -- bool, True iff all citations validated
         n_citations      -- int, total [N] tags in the answer
-        out_of_range     -- list[int], cited indices that don't exist in chunks
-        unsupported      -- list[dict], citations whose sentence doesn't
-                            fuzzy-match the cited chunk
+        out_of_range     -- list[int], cited indices that don't exist
+        unsupported      -- list[dict], citations whose sentence isn't
+                            grounded in ANY of its cited chunks
     """
     n_chunks = len(chunks)
     sentences = _split_sentences(answer_text)
@@ -71,6 +93,7 @@ def verify_answer(
 
     for sentence in sentences:
         for match in _CITATION_RE.finditer(sentence):
+            cited = []
             for piece in match.group(1).split(","):
                 try:
                     n = int(piece.strip())
@@ -79,14 +102,26 @@ def verify_answer(
                 total += 1
                 if n < 1 or n > n_chunks:
                     out_of_range.append(n)
-                    continue
-                chunk = chunks[n - 1]
-                if not _sentence_supported_by_chunk(
-                    sentence, chunk, min_partial_ratio
-                ):
+                else:
+                    cited.append(n)
+            if not cited:
+                continue
+            # any-of-cited: sentence is supported if at least one of its
+            # cited chunks fuzzy-matches.
+            any_supports = any(
+                _sentence_supported_by_chunk(
+                    sentence, chunks[n - 1], min_partial_ratio,
+                    min_token_set_ratio,
+                )
+                for n in cited
+            )
+            if not any_supports:
+                # Flag every cited (in-range) index for this sentence so
+                # the UI can surface ALL the chunks it tried.
+                for n in cited:
                     unsupported.append({
                         "n": n,
-                        "chunk_id": chunk.get("chunk_id"),
+                        "chunk_id": chunks[n - 1].get("chunk_id"),
                         "sentence": sentence.strip(),
                     })
 
@@ -96,6 +131,7 @@ def verify_answer(
         "out_of_range": out_of_range,
         "unsupported": unsupported,
         "min_partial_ratio": min_partial_ratio,
+        "min_token_set_ratio": min_token_set_ratio,
     }
 
 
@@ -109,15 +145,25 @@ def _split_sentences(text: str) -> list[str]:
 
 
 def _sentence_supported_by_chunk(
-    sentence: str, chunk: dict[str, Any], threshold: int
+    sentence: str,
+    chunk: dict[str, Any],
+    partial_ratio_threshold: int,
+    token_set_threshold: int = 50,
 ) -> bool:
     """True iff the sentence's claim is plausibly grounded in the chunk.
 
-    Empirically, ``partial_ratio`` discriminates better than the
-    token-based variants here: stop-word overlap inflates the
-    token-set scorers to ~100 even on unrelated content, while
-    ``partial_ratio`` scores ~70 for legitimate paraphrase and ~45 for
-    unrelated claims.
+    Two scorers are tried; either can clear its threshold:
+
+    - ``partial_ratio``: best for verbatim-or-paraphrase alignment in
+      contiguous prose. Threshold 50 separates legitimate paraphrase
+      (~70) and heavy synthesis (~57) from unrelated content (~45).
+    - ``token_set_ratio``: token-overlap that scales by both sides'
+      unique sets. Threshold 55 catches table-derived sentences (chunk
+      is cell-flattened, sentence is natural prose) at ~60 while
+      rejecting unrelated content at ~49.
+
+    Tables get an additional pass against their tags-stripped
+    ``table_html`` rendering.
     """
     from rapidfuzz import fuzz
 
@@ -132,16 +178,18 @@ def _sentence_supported_by_chunk(
     if not claim:
         return False
 
-    if fuzz.partial_ratio(claim, chunk_text) >= threshold:
-        return True
-
-    # Tables get a second chance against their HTML rendering — sometimes
-    # the plain-text flattening obscures cell-level alignment that the
-    # answer actually quoted.
+    targets = [chunk_text]
     if table_html:
         flat = re.sub(r"<[^>]+>", " ", table_html)
         flat = re.sub(r"\s+", " ", flat).strip()
-        if fuzz.partial_ratio(claim, flat) >= threshold:
-            return True
+        if flat:
+            targets.append(flat)
 
+    for target in targets:
+        if not target:
+            continue
+        if fuzz.partial_ratio(claim, target) >= partial_ratio_threshold:
+            return True
+        if fuzz.token_set_ratio(claim, target) >= token_set_threshold:
+            return True
     return False

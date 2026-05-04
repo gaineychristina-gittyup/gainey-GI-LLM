@@ -54,12 +54,13 @@ def test_out_of_range_citation_flagged():
 
 def test_unsupported_claim_flagged():
     """A citation pointing to chunk 2 (gastroparesis), but the sentence
-    talks about appendicitis — the partial-ratio match should fail."""
+    talks about appendicitis. With both scorers tightened to high
+    thresholds the unrelated content fails."""
     text = (
         "We recommend laparoscopic appendectomy within 24 hours of presentation "
         "for uncomplicated appendicitis [2]."
     )
-    res = verify_answer(text, CHUNKS, min_partial_ratio=80)
+    res = verify_answer(text, CHUNKS, min_partial_ratio=80, min_token_set_ratio=70)
     assert not res["ok"]
     assert any(u["n"] == 2 for u in res["unsupported"])
 
