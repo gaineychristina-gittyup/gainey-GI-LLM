@@ -22,7 +22,12 @@ from pydantic import BaseModel, Field
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # Must run BEFORE importing the answer/retrieve modules — those grab
 # ANTHROPIC_API_KEY / VOYAGE_API_KEY / COHERE_API_KEY at first call.
-load_dotenv(REPO_ROOT / ".env")
+# override=True so the .env file wins over an empty/stale value the
+# parent shell may have exported (e.g. ANTHROPIC_API_KEY="" inherited
+# from a wrapper); without it, load_dotenv silently refuses to
+# overwrite an already-set var and the request fails with a confusing
+# 500 from deep inside the embedder/Anthropic client.
+load_dotenv(REPO_ROOT / ".env", override=True)
 
 from src.api import history  # noqa: E402
 from src.generate import answer, answer_stream  # noqa: E402

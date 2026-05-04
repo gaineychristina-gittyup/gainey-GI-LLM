@@ -406,6 +406,12 @@ def render_inline_citations(answer_text: str) -> str:
     focused-citation div in the source pane. Clicking switches the
     pane via the CSS ``:target`` selector, so only the cited source
     is visible at a time; no Streamlit rerun is involved.
+
+    Newlines pass through unchanged so Markdown lists and pipe tables
+    render correctly. An earlier version replaced "\\n" with "<br/>"
+    which silently flattened bullet lists and table separators — the
+    system prompt now instructs Claude to emit Markdown, so preserving
+    the structure here is load-bearing.
     """
     def repl(m: re.Match) -> str:
         nums = [n.strip() for n in m.group(1).split(",")]
@@ -414,8 +420,31 @@ def render_inline_citations(answer_text: str) -> str:
             for n in nums
         ]
         return " ".join(badges)
-    out = _CITATION_RE.sub(repl, answer_text)
-    return out.replace("\n", "<br/>")
+    return _CITATION_RE.sub(repl, answer_text)
+
+
+def format_citation(c: dict[str, Any]) -> str:
+    """Compact one-line citation header — society, year, lead author,
+    recommendation ID, and page range. Used by tests and any caller
+    that wants a short single-line label for a chunk."""
+    bits = [f"{c.get('society') or '?'} {c.get('year') or '?'}"]
+    author = derive_lead_author(c.get("pdf_path") or "")
+    if not author and c.get("title"):
+        m = re.search(r"by\s+([A-Z][a-z]+)", c.get("title") or "")
+        if m:
+            author = m.group(1)
+    if author:
+        bits.append(author)
+    if c.get("recommendation_id"):
+        bits.append(c["recommendation_id"])
+    page = ""
+    if c.get("page_start") and c.get("page_end") and c["page_start"] != c["page_end"]:
+        page = f"pp. {c['page_start']}-{c['page_end']}"
+    elif c.get("page_start"):
+        page = f"p. {c['page_start']}"
+    if page:
+        bits.append(page)
+    return ", ".join(bits)
 
 
 def _build_citing_sentences(answer_text: str) -> dict[int, list[str]]:

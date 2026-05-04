@@ -241,7 +241,7 @@ def get_db_connection() -> psycopg.Connection:
 
 
 def main(argv: list[str] | None = None) -> int:
-    load_dotenv()
+    load_dotenv(override=True)
     parser = argparse.ArgumentParser(description="Build the GI guidelines RAG index.")
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--csv", type=Path, help="Path to corpus_metadata.csv")

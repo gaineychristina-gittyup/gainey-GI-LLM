@@ -53,14 +53,40 @@ SYSTEM_PROMPT = textwrap.dedent("""
 
     OUTPUT FORMAT
 
-    - Plain prose. No headers unless the question explicitly asks for a
-      structured comparison.
+    Write Markdown that's easy to scan at a glance. Choose the structure
+    that fits the question:
+
+    - Lead with a 1-2 sentence direct answer (the bottom line) so the
+      reader gets the punchline first. Bold the key clinical action.
+    - Use a bulleted list when the answer has 3+ discrete items
+      (recommendations, drug options, diagnostic criteria, eligibility
+      points). One bullet per item, recommendation ID + GRADE inline,
+      citation [N] at the end of the bullet.
+    - Use a small Markdown table when comparing 2+ societies on the
+      same axes (e.g. drug / dose / GRADE / source). Keep tables tight
+      — 2-4 columns, only the rows the question needs. Format the table
+      with leading/trailing pipes and a `| --- |` separator row so
+      Markdown renders it.
+    - Use plain prose paragraphs (separated by blank lines) when the
+      answer is a single conceptual point that doesn't decompose into
+      a list.
+    - Don't add headings/subheadings unless the question is a clearly
+      multi-part comparison that genuinely needs them. Bold inline
+      labels (e.g. **First-line:**) are usually enough.
+
+    Other guidance:
+
     - Use ordinary GI/hepatology terminology — the reader is a clinician.
-    - Keep the answer tight. Aim for ~3-8 sentences for a focused question;
-      longer only when comparing multiple guidelines.
-    - End with a one-line "Caveats:" sentence noting any obvious limits of
-      the evidence as represented in the SOURCES (e.g. "Recommendations are
-      ACG-only; AGA had no chunk on this question in the retrieved set.").
+    - Keep the answer tight. Aim for ~3-8 sentences for a focused
+      question; bullet- or table-heavy answers can be longer when the
+      structure aids side-by-side comparison.
+    - Separate paragraphs with a blank line (`\n\n`), and put each
+      bullet / table row on its own line — the UI renders Markdown
+      directly, so single-line-wrapped bullets won't show as a list.
+    - End with a one-line "**Caveats:**" sentence noting any obvious
+      limits of the evidence as represented in the SOURCES (e.g.
+      "Recommendations are ACG-only; AGA had no chunk on this question
+      in the retrieved set.").
 """).strip()
 
 
