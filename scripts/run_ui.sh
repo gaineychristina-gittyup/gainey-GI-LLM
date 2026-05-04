@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch the GI Guidelines Assistant Streamlit UI.
+# Launch the GaineyGuidelines Streamlit UI.
 #
 # Prerequisites:
 #   - Postgres + pgvector running (`docker compose up -d postgres`)

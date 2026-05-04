@@ -75,8 +75,8 @@ retrieval:
 
 # ---------- UI (Phase 5) ----------
 ui:
-  title: "GI Guidelines Assistant"
-  subtitle: "Grounded answers from AGA, ACG, ASGE, and AASLD"
+  title: "GaineyGuidelines"
+  subtitle: "Grounded answers from AGA, ACG, ASGE, and AASLD clinical guidelines"
   default_top_k: 6
   show_debug_toggle: true
   phi_check:

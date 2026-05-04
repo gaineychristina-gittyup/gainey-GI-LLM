@@ -25,6 +25,9 @@ data/raw_pdfs/
 data/parsed/
 data/logs/
 
+# Runtime UI logs (qa_log.jsonl, etc.) — generated, not source.
+logs/
+
 # OS
 .DS_Store
 Thumbs.db
