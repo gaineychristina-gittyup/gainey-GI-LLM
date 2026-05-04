@@ -72,8 +72,9 @@ def inject_global_styles() -> None:
             --gg-cite-text: #1d4ed8;
         }
         html, body, [class*="css"] {
-            font-family: -apple-system, BlinkMacSystemFont, "Inter",
-                "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            font-family: "Avenir Next", "Avenir", -apple-system,
+                BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+                Arial, sans-serif;
         }
         .block-container {
             padding-top: 3rem;
@@ -105,6 +106,133 @@ def inject_global_styles() -> None:
         section[data-testid="stSidebar"] {
             background: #f5f7fa;
             border-right: 1px solid var(--gg-border);
+        }
+        /* Compact sidebar typography for the Conversations list. */
+        section[data-testid="stSidebar"] h4 {
+            font-size: 0.85rem;
+            font-weight: 700;
+            margin: 0 0 0.5rem;
+            color: var(--gg-text);
+        }
+        section[data-testid="stSidebar"] .gg-conv-bucket {
+            font-size: 0.65rem;
+            font-weight: 600;
+            color: var(--gg-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            margin: 0.85rem 0 0.25rem 0.1rem;
+        }
+        /* Conversation list — rendered as raw <a> links via st.markdown
+           so we sidestep Streamlit button's emotion-cache CSS specificity
+           (which makes button text impossible to shrink/left-align). */
+        section[data-testid="stSidebar"] .gg-conv-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.1rem;
+        }
+        section[data-testid="stSidebar"] .gg-conv-item {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-size: 0.78rem;
+            line-height: 1.25;
+            padding: 0.35rem 0.5rem;
+            border-radius: 6px;
+            color: var(--gg-text);
+            text-decoration: none;
+            transition: background 0.12s ease;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+        section[data-testid="stSidebar"] .gg-conv-item:hover {
+            background: var(--gg-accent-soft);
+            text-decoration: none;
+            color: var(--gg-text);
+        }
+        section[data-testid="stSidebar"] .gg-conv-icon {
+            flex: 0 0 auto;
+            font-size: 0.85rem;
+            opacity: 0.7;
+        }
+        section[data-testid="stSidebar"] .gg-conv-title {
+            flex: 1 1 auto;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: var(--gg-text);
+        }
+        section[data-testid="stSidebar"] .gg-conv-time {
+            flex: 0 0 auto;
+            font-size: 0.7rem;
+            color: var(--gg-muted);
+        }
+        section[data-testid="stSidebar"] .stButton > button:not([kind="primary"]) {
+            font-size: 0.78rem !important;
+            line-height: 1.25 !important;
+            padding: 0.35rem 0.55rem !important;
+            border: 1px solid transparent !important;
+            background: transparent !important;
+            text-align: left !important;
+            justify-content: flex-start !important;
+            color: var(--gg-text) !important;
+            min-height: 0 !important;
+            display: block !important;
+            width: 100% !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button:not([kind="primary"]) [data-testid="stMarkdownContainer"] {
+            text-align: left !important;
+            display: block !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button:not([kind="primary"]) [data-testid="stMarkdownContainer"] p {
+            font-size: 0.78rem !important;
+            text-align: left !important;
+            margin: 0 !important;
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            line-height: 1.3 !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button:not([kind="primary"]):hover {
+            background: var(--gg-accent-soft) !important;
+            border-color: var(--gg-accent-soft) !important;
+            color: var(--gg-text) !important;
+        }
+        /* Suggested-questions list — rendered as <a> links rather than
+           Streamlit buttons so we sidestep emotion-cache CSS specificity. */
+        .gg-sugg-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+        .gg-sugg-item {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            padding: 0.55rem 0.9rem;
+            border: 1px solid var(--gg-border);
+            border-radius: 8px;
+            background: var(--gg-surface);
+            color: var(--gg-text);
+            text-decoration: none;
+            font-size: 0.9rem;
+            line-height: 1.35;
+            transition: border-color 0.12s ease, background 0.12s ease;
+        }
+        .gg-sugg-item:hover {
+            border-color: var(--gg-accent);
+            background: var(--gg-accent-soft);
+            color: var(--gg-text);
+            text-decoration: none;
+        }
+        .gg-sugg-icon {
+            flex: 0 0 auto;
+            color: var(--gg-muted);
+            display: inline-flex;
+            align-items: center;
+        }
+        .gg-sugg-text {
+            flex: 1 1 auto;
+            color: var(--gg-text);
         }
         /* Repaint Streamlit's red primary chrome (multiselect tags,
            slider track/thumb, spinner) in our teal accent so the page
@@ -447,15 +575,31 @@ def format_citation(c: dict[str, Any]) -> str:
     return ", ".join(bits)
 
 
+def _strip_markdown(text: str) -> str:
+    """Strip common Markdown decorations (bold, italic, list bullets,
+    inline code) so the raw text can be safely HTML-escaped and shown
+    as plain prose in the cited-claims preview. The answer renders
+    Markdown elsewhere; this is preview-only."""
+    out = text
+    out = re.sub(r"\*\*([^*]+)\*\*", r"\1", out)
+    out = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", out)
+    out = re.sub(r"`([^`]+)`", r"\1", out)
+    out = re.sub(r"^\s*[-*•]\s+", "", out, flags=re.MULTILINE)
+    out = re.sub(r"\s+", " ", out)
+    return out.strip()
+
+
 def _build_citing_sentences(answer_text: str) -> dict[int, list[str]]:
     """Return ``{chunk_index: [sentence_text, ...]}`` — for each chunk N,
     the answer sentences that include ``[N]``. The pane uses these as
     the "Cited claim" preview alongside the source text, so the user
     sees what the citation is supporting before reading the chunk.
+    Sentences are stripped of Markdown decorations so they read as
+    clean prose in the preview box.
     """
     citing: dict[int, list[str]] = {}
     for sentence in _SENTENCE_END_RE.split(answer_text):
-        sentence = sentence.strip()
+        sentence = _strip_markdown(sentence)
         if not sentence:
             continue
         for m in _CITATION_RE.finditer(sentence):

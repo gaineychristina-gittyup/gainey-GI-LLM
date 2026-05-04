@@ -27,6 +27,7 @@ appended to logs/qa_log.jsonl for offline review.
 from __future__ import annotations
 
 import hmac
+import html as html_module
 import json
 import os
 import time
@@ -280,18 +281,49 @@ def render_saved_history(rec: dict[str, Any]) -> None:
 
 
 EXAMPLE_QUESTIONS = [
-    ("Barrett's surveillance interval",
-     "What's the recommended endoscopic surveillance interval for low-grade "
-     "dysplasia in Barrett's esophagus, and what's the GRADE?"),
-    ("First-line gastroparesis treatment",
-     "What's the first-line pharmacologic treatment for diabetic gastroparesis, "
-     "and do AGA and ACG agree?"),
-    ("Acute pancreatitis severity",
-     "How do I assess severity in acute pancreatitis at presentation?"),
-    ("Post-ERCP pancreatitis prevention",
-     "What does ASGE recommend for prevention of post-ERCP pancreatitis "
-     "in high-risk patients?"),
+    "Should patients with a history of diverticulitis avoid NSAIDS and aspirin?",
+    "For patients with pouchitis who start vedolizumab, should I stop antibiotics?",
+    "Barrett's esophagus with low-grade dysplasia — how do I discuss endoscopic "
+    "eradication therapy vs surveillance with a hesitant patient?",
+    "What's the first-line pharmacologic treatment for diabetic gastroparesis, "
+    "and do AGA and ACG agree?",
+    "What does ASGE recommend for prevention of post-ERCP pancreatitis "
+    "in high-risk patients?",
 ]
+
+
+def _bucket_history_by_age(history: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Group history records into time-bucket sections (Today / Yesterday /
+    This week / Earlier), preserving the input order within each bucket.
+    Returns only non-empty buckets, in chronological order."""
+    today: list[dict[str, Any]] = []
+    yesterday: list[dict[str, Any]] = []
+    this_week: list[dict[str, Any]] = []
+    earlier: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    today_date = now.date()
+    for rec in history:
+        try:
+            ts = datetime.fromisoformat(rec.get("ts") or "")
+        except (TypeError, ValueError):
+            earlier.append(rec)
+            continue
+        days = (today_date - ts.date()).days
+        if days <= 0:
+            today.append(rec)
+        elif days == 1:
+            yesterday.append(rec)
+        elif days < 7:
+            this_week.append(rec)
+        else:
+            earlier.append(rec)
+    sections = [
+        ("Today", today),
+        ("Yesterday", yesterday),
+        ("This week", this_week),
+        ("Earlier", earlier),
+    ]
+    return [(name, items) for name, items in sections if items]
 
 
 def render_main_page() -> None:
@@ -307,27 +339,71 @@ def render_main_page() -> None:
 
     render_corpus_snapshot_header(title, subtitle)
 
-    # --- sidebar: prior conversations + filters ----
+    # --- sidebar: conversations + filters ----
+    history = read_qa_history(limit=50)
+    # Handle clicks on sidebar-conversation and suggested-question links
+    # via query params. Streamlit's st.button has emotion-cache CSS
+    # specificity that overrides our styling, so we render those lists as
+    # plain HTML <a> links that navigate to ?open_history=N or ?ask=N
+    # — the script re-runs on click and we route the intent here.
+    qp = st.query_params
+    if "open_history" in qp:
+        try:
+            idx = int(qp["open_history"])
+        except (TypeError, ValueError):
+            idx = -1
+        if 0 <= idx < len(history):
+            st.session_state["viewing_history"] = history[idx]
+        del qp["open_history"]
+        st.rerun()
+    if "ask" in qp:
+        try:
+            idx = int(qp["ask"])
+        except (TypeError, ValueError):
+            idx = -1
+        if 0 <= idx < len(EXAMPLE_QUESTIONS):
+            st.session_state["pending_query"] = EXAMPLE_QUESTIONS[idx]
+            st.session_state.pop("viewing_history", None)
+        del qp["ask"]
+        st.rerun()
+
     with st.sidebar:
-        st.subheader("Prior conversations")
-        history = read_qa_history(limit=25)
+        st.markdown("#### Conversations")
         if not history:
             st.caption(
                 "No prior questions yet. Ask one and it'll show up here."
             )
         else:
-            st.caption(f"{len(history)} recent · click to restore")
-            for i, rec in enumerate(history):
-                q_text = (rec.get("question") or "").strip()
-                short = q_text if len(q_text) <= 70 else q_text[:67] + "…"
-                rel = _format_history_ts(rec.get("ts") or "")
-                label = f"{short}\n\n_{rel}_" if rel else short
-                if st.button(
-                    label, key=f"hist_{i}", use_container_width=True,
-                    help=q_text,
-                ):
-                    st.session_state["viewing_history"] = rec
-                    st.rerun()
+            sections = _bucket_history_by_age(history)
+            global_idx = 0
+            html_parts: list[str] = ["<div class='gg-conv-list'>"]
+            for section_name, items in sections:
+                html_parts.append(
+                    f"<div class='gg-conv-bucket'>{section_name}</div>"
+                )
+                for rec in items:
+                    q_text = (rec.get("question") or "").strip()
+                    safe_text = html_module.escape(q_text)
+                    rel = html_module.escape(
+                        _format_history_ts(rec.get("ts") or "")
+                    )
+                    title_budget = max(18, 28 - len(rel))
+                    short = (
+                        safe_text if len(safe_text) <= title_budget
+                        else safe_text[:title_budget - 1] + "…"
+                    )
+                    html_parts.append(
+                        f"<a class='gg-conv-item' "
+                        f"href='?open_history={global_idx}' "
+                        f"title='{safe_text}' target='_self'>"
+                        f"<span class='gg-conv-icon'>💬</span>"
+                        f"<span class='gg-conv-title'>{short}</span>"
+                        f"<span class='gg-conv-time'>{rel}</span>"
+                        f"</a>"
+                    )
+                    global_idx += 1
+            html_parts.append("</div>")
+            st.markdown("\n".join(html_parts), unsafe_allow_html=True)
 
         st.markdown("---")
         with st.expander("Filters", expanded=False):
@@ -407,27 +483,12 @@ def render_main_page() -> None:
                     "Ask", type="primary", use_container_width=True,
                 )
 
-        st.caption("Try one of these:")
-        selected_example = None
-        for row_start in range(0, len(EXAMPLE_QUESTIONS), 2):
-            row_cols = st.columns(2)
-            for j, (label, eq) in enumerate(
-                EXAMPLE_QUESTIONS[row_start:row_start + 2]
-            ):
-                with row_cols[j]:
-                    if st.button(
-                        label, key=f"eg_{row_start + j}",
-                        use_container_width=True,
-                    ):
-                        selected_example = eq
-
-        # Example-button click acts as a same-tick form submission with
-        # the predefined query. Streamlit fires us a rerun on click, and
-        # on that rerun ``selected_example`` is set when we re-enter the
-        # button loop above — so this branch is reached on the same run
-        # the user actually expects to see the answer on.
-        if selected_example and not submitted:
-            q = selected_example
+        # If the query-param handler at the top of the page stashed a
+        # suggested question for us, treat it as if the user typed and
+        # hit Ask on this run.
+        pending = st.session_state.pop("pending_query", None)
+        if pending and not submitted:
+            q = pending
             submitted = True
 
         # If the user clicked a sidebar history item AND isn't kicking off
@@ -436,6 +497,35 @@ def render_main_page() -> None:
         saved = st.session_state.get("viewing_history")
         if saved and not (submitted and q.strip()):
             render_saved_history(saved)
+
+        # Auto-collapse the Suggested Questions panel when there's an
+        # answer or saved view to show, so the answer stays above the
+        # fold. Render as raw HTML <a> links (not st.button) to avoid
+        # Streamlit's emotion-cache CSS specificity battles.
+        will_show_answer = (
+            (submitted and q.strip()) or bool(saved)
+        )
+        sugg_html = ["<div class='gg-sugg-list'>"]
+        for i, eq in enumerate(EXAMPLE_QUESTIONS):
+            sugg_html.append(
+                f"<a class='gg-sugg-item' "
+                f"href='?ask={i}' target='_self' "
+                f"title='{html_module.escape(eq)}'>"
+                f"<span class='gg-sugg-icon'>"
+                "<svg width='14' height='14' viewBox='0 0 24 24' "
+                "fill='none' stroke='currentColor' stroke-width='2' "
+                "stroke-linecap='round' stroke-linejoin='round'>"
+                "<circle cx='11' cy='11' r='8'/>"
+                "<line x1='21' y1='21' x2='16.65' y2='16.65'/>"
+                "</svg></span>"
+                f"<span class='gg-sugg-text'>{html_module.escape(eq)}</span>"
+                f"</a>"
+            )
+        sugg_html.append("</div>")
+        with st.expander(
+            "**Suggested Questions**", expanded=not will_show_answer,
+        ):
+            st.markdown("\n".join(sugg_html), unsafe_allow_html=True)
 
         if submitted and q.strip():
             # Clear any saved-history view on a fresh submission so the
