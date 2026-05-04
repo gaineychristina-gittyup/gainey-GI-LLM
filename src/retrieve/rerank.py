@@ -39,9 +39,13 @@ def rerank_candidates(
     query: str,
     candidates: list[dict[str, Any]],
     *,
-    top_k: int = 6,
+    top_k: int | None = None,
 ) -> list[dict[str, Any]]:
     """Rerank ``candidates`` and return the top ``top_k`` with relevance_score.
+
+    ``top_k`` precedence: explicit caller arg > ``config.yaml``
+    ``retrieval.top_k`` > 6. (The previous version inverted that and made
+    ``--top-k`` from the CLI a no-op.)
 
     After the model picks its top_k, we apply a *typed-chunk floor*:
     the top fused ``table`` and top fused ``recommendation`` chunks are
@@ -56,61 +60,127 @@ def rerank_candidates(
         return []
     cfg = _load_config().get("retrieval", {})
     provider = cfg.get("reranker_provider", "cohere")
-    top_k = int(cfg.get("top_k", top_k))
+    if top_k is None:
+        top_k = int(cfg.get("top_k", 6))
     ranked = _get_reranker(provider)(query, candidates, top_k)
-    if cfg.get("typed_floor", True):
-        ranked = _apply_typed_floor(
-            candidates, ranked, top_k,
-            types=tuple(cfg.get("typed_floor_types", ("table", "recommendation"))),
-        )
-    return ranked
+    return _apply_floors(
+        candidates, ranked, top_k,
+        typed_types=tuple(cfg.get("typed_floor_types", ("table", "recommendation"))),
+        typed_floor_enabled=bool(cfg.get("typed_floor", True)),
+        society_floor_enabled=bool(cfg.get("society_floor", True)),
+        society_floor_min=int(cfg.get("society_floor_min_societies", 2)),
+        society_floor_pool_size=int(cfg.get("society_floor_pool_size", 20)),
+    )
 
 
-def _apply_typed_floor(
+def _apply_floors(
     candidates: list[dict[str, Any]],
     ranked: list[dict[str, Any]],
     top_k: int,
-    types: tuple[str, ...],
+    *,
+    typed_types: tuple[str, ...],
+    typed_floor_enabled: bool,
+    society_floor_enabled: bool,
+    society_floor_min: int,
+    society_floor_pool_size: int,
 ) -> list[dict[str, Any]]:
-    """Ensure the top fused chunk of each ``types`` element is in ``ranked``.
+    """Apply the typed-chunk floor and the society-diversity floor.
 
-    If a typed chunk is already present in ``ranked``, we leave it. Otherwise
-    we collect the highest-fused candidate of that type that's not in
-    ``ranked``. After collecting all promotions, we splice them in at the
-    tail in one shot so a later promotion can't evict an earlier one.
-    ``candidates`` is assumed to be in fused-rank order.
+    Both floors collect "promotion" rows that are guaranteed a slot in the
+    final output. Promotions are then spliced in at the tail as a single
+    operation, so a later promotion can't evict an earlier one (the bug
+    that surfaced when the typed-floor used per-iteration list mutation).
+
+    Typed floor: ensures the top fused chunk of each element_type in
+    ``typed_types`` is present.
+
+    Society-diversity floor: when the fused top ``society_floor_pool_size``
+    spans ``society_floor_min`` or more societies, ensures each of those
+    societies contributes at least one chunk. Cohere v3 has a measurable
+    bias toward whichever society's writing reads most like a direct
+    answer to the query, so for cross-society questions we'd otherwise
+    lose the dissenting-society chunk to the reranker every time.
     """
     out = list(ranked)
     seen = {r["chunk_id"] for r in out}
-
     promotions: list[dict[str, Any]] = []
-    promoted_types: set[str] = set()
-    for etype in types:
-        # Already covered by a reranker pick or a previous promotion? Skip.
-        if any(r.get("element_type") == etype for r in out):
-            continue
-        if etype in promoted_types:
-            continue
-        promoted = next(
-            (c for c in candidates
-             if c.get("element_type") == etype and c["chunk_id"] not in seen),
-            None,
-        )
-        if promoted is None:
-            continue
-        p = dict(promoted)
-        p["relevance_score"] = float(p.get("rrf_score") or 0.0)
-        p["promoted_by"] = "typed_floor"
-        promotions.append(p)
-        promoted_types.add(etype)
-        seen.add(p["chunk_id"])
+
+    def already_covers(predicate) -> bool:
+        return any(predicate(r) for r in out + promotions)
+
+    if typed_floor_enabled:
+        for etype in typed_types:
+            if already_covers(lambda r: r.get("element_type") == etype):
+                continue
+            promoted = next(
+                (c for c in candidates
+                 if c.get("element_type") == etype and c["chunk_id"] not in seen),
+                None,
+            )
+            if promoted is None:
+                continue
+            p = dict(promoted)
+            p["relevance_score"] = float(p.get("rrf_score") or 0.0)
+            p["promoted_by"] = "typed_floor"
+            promotions.append(p)
+            seen.add(p["chunk_id"])
+
+    if society_floor_enabled:
+        # Look at the head of fused candidates (not all of them) so a
+        # society with only deep-rank chunks doesn't claim a slot.
+        head = candidates[: max(society_floor_pool_size, top_k)]
+        societies_in_head = []
+        for c in head:
+            soc = c.get("society")
+            if soc and soc not in societies_in_head:
+                societies_in_head.append(soc)
+        typed_set = set(typed_types)
+        if len(societies_in_head) >= society_floor_min:
+            for soc in societies_in_head:
+                # Does this society have any TYPED chunk (table /
+                # recommendation / etc.) in the fused head? If not, no
+                # promotion target — skip.
+                soc_typed_in_head = [
+                    c for c in head
+                    if c.get("society") == soc and c.get("element_type") in typed_set
+                ]
+                if not soc_typed_in_head:
+                    # Fall back to any chunk for this society, since there's
+                    # nothing structured to promote.
+                    if already_covers(lambda r, s=soc: r.get("society") == s):
+                        continue
+                    promoted = next(
+                        (c for c in head
+                         if c.get("society") == soc and c["chunk_id"] not in seen),
+                        None,
+                    )
+                else:
+                    # Society has typed content available. Require a typed
+                    # chunk specifically — covers Cohere's "AGA wins all rerank
+                    # slots; ACG only surfaces as prose context" pattern.
+                    if already_covers(
+                        lambda r, s=soc, ts=typed_set:
+                        r.get("society") == s and r.get("element_type") in ts
+                    ):
+                        continue
+                    promoted = next(
+                        (c for c in soc_typed_in_head
+                         if c["chunk_id"] not in seen),
+                        None,
+                    )
+                if promoted is None:
+                    continue
+                p = dict(promoted)
+                p["relevance_score"] = float(p.get("rrf_score") or 0.0)
+                p["promoted_by"] = "society_floor"
+                promotions.append(p)
+                seen.add(p["chunk_id"])
 
     if not promotions:
         return out
 
     # Splice in one shot: keep the top (top_k - len(promotions)) reranker
-    # picks, then append the promotions. This guarantees each promotion
-    # gets its slot regardless of iteration order.
+    # picks, then append the promotions. Bounded to top_k slots total.
     n_keep = max(0, top_k - len(promotions))
     return out[:n_keep] + promotions
 

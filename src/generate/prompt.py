@@ -93,7 +93,9 @@ def format_sources_block(chunks: list[dict[str, Any]]) -> str:
             meta_bits.append(f"page {ps}")
         if (rid := c.get("recommendation_id")):
             meta_bits.append(rid)
-        if (gs := c.get("grade_strength")) or (ge := c.get("grade_evidence")):
+        gs = c.get("grade_strength")
+        ge = c.get("grade_evidence")
+        if gs or ge:
             grade = " / ".join(x for x in [gs, ge] if x)
             meta_bits.append(f"GRADE: {grade}")
         meta_line = "    " + ", ".join(meta_bits) if meta_bits else ""

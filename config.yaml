@@ -48,6 +48,16 @@ retrieval:
   reranker_provider: cohere  # "cohere" (API) | "bge" (local cross-encoder)
   cohere_model: rerank-english-v3.0
   bge_reranker_model: BAAI/bge-reranker-v2-m3  # only used when reranker_provider=bge
+  # --- post-rerank floors ---
+  typed_floor: true
+  typed_floor_types: [table, recommendation]
+  # Society-diversity floor: when the fused candidate head spans this many or
+  # more societies, ensure each contributes at least one chunk. Counters
+  # Cohere's tendency to pile rerank slots onto whichever society's writing
+  # most resembles a direct answer.
+  society_floor: true
+  society_floor_min_societies: 2
+  society_floor_pool_size: 20
 
 # ---------- Generation (Phase 4) ----------
 generation:
