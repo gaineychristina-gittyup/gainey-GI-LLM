@@ -46,6 +46,7 @@ class Filters(BaseModel):
     year_max: Optional[int] = None
     topic: Optional[list[str]] = None
     element_types: Optional[list[str]] = None
+    doc_type: Optional[list[str]] = None  # 'Guideline' | 'Guidance' | 'Standards' | 'Other'
 
 
 class RetrieveRequest(BaseModel):

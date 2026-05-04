@@ -112,11 +112,43 @@ pytest tests/test_chunk.py -v
 (LLM and embedding APIs are not unit-tested; we validate them end-to-end via
 the Phase 6 eval harness.)
 
+## Running the clinician UI (Phase 5)
+
+The browser UI is two processes — a FastAPI backend and a Streamlit
+front-end. Start them in two terminals:
+
+```bash
+# Terminal 1 — backend
+.venv/bin/uvicorn src.api.app:app --port 8000 --reload
+
+# Terminal 2 — UI
+bash scripts/run_ui.sh
+# then open http://localhost:8501
+```
+
+Things to try once it loads:
+
+- **Specific recommendation**: *"What's the recommended endoscopic surveillance
+  interval for low-grade dysplasia in Barrett's esophagus, and what's the
+  GRADE?"* — verifies citation rendering + table chunk inline.
+- **Cross-society**: *"What's the first-line pharmacologic treatment for
+  diabetic gastroparesis, and do AGA and ACG agree?"* — should pull both
+  AGA 2025 and ACG 2022 chunks.
+- **Out-of-corpus refusal**: *"What's the optimal anesthesia regimen for
+  ERCP in pregnancy?"* — friendly "didn't cover this directly" banner.
+- **Figure**: *"What does the management algorithm for Barrett's surveillance
+  look like?"* — the figure_caption chunk for Figure 2 should render its
+  PNG inline.
+- **PHI guard**: *"Patient John Smith, DOB 03/15/1965, presented with..."* —
+  the screen blocks before the question reaches the model.
+
+Each Q&A is appended to `logs/qa_log.jsonl` for offline review.
+
 ## Roadmap
 
 - ✅ Phase 1 — scaffolding
 - ✅ Phase 2 — ingestion pipeline
-- ⬜ Phase 3 — hybrid retrieval + Cohere rerank
-- ⬜ Phase 4 — strict-grounded generation with Claude Sonnet 4.5
-- ⬜ Phase 5 — FastAPI + Streamlit interface
+- ✅ Phase 3 — hybrid retrieval + Cohere rerank
+- ✅ Phase 4 — strict-grounded generation with Claude Opus 4.7
+- ✅ Phase 5 — FastAPI + Streamlit clinician UI
 - ⬜ Phase 6 — evaluation harness against CDS vignettes

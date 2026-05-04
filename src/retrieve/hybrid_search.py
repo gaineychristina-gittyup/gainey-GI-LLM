@@ -203,6 +203,48 @@ def _filter_clause(filters: dict[str, Any]) -> tuple[str, tuple]:
         parts.append("AND c.element_type = ANY(%s)")
         params.append(_as_list(etypes))
 
+    if (doc_types := filters.get("doc_type")):
+        # We don't have a doc_type column — derive from title patterns.
+        # 'Guideline' covers most society-issued numbered guidelines;
+        # 'Guidance' is AASLD's house style; 'Standards' covers QI / quality
+        # indicators / reprocessing / minimum-staffing documents. 'Other'
+        # is anything that didn't match the above (clinical practice
+        # updates, expert reviews, summaries).
+        # Standards-style titles often also contain "guideline" (e.g.
+        # "ASGE guideline on minimum staffing"), so the Standards predicate
+        # gets exclusive priority over Guideline. The Python helper in
+        # src/ui/components.py uses the same priority — keep them in sync.
+        # NB: psycopg uses '%s' as a placeholder, so literal '%' in SQL
+        # must be doubled to '%%'.
+        STANDARDS = (
+            "d.title ILIKE '%%quality indicator%%' "
+            "OR d.title ILIKE '%%standards%%' "
+            "OR d.title ILIKE '%%reprocessing%%' "
+            "OR d.title ILIKE '%%minimum staffing%%'"
+        )
+        patterns = []
+        doc_type_list = _as_list(doc_types)
+        if "Standards" in doc_type_list:
+            patterns.append(f"({STANDARDS})")
+        if "Guidance" in doc_type_list:
+            patterns.append(
+                f"(d.title ILIKE '%%guidance%%' AND NOT ({STANDARDS}))"
+            )
+        if "Guideline" in doc_type_list:
+            patterns.append(
+                f"(d.title ILIKE '%%guideline%%' "
+                f"AND d.title NOT ILIKE '%%guidance%%' "
+                f"AND NOT ({STANDARDS}))"
+            )
+        if "Other" in doc_type_list:
+            patterns.append(
+                f"(d.title NOT ILIKE '%%guideline%%' "
+                f"AND d.title NOT ILIKE '%%guidance%%' "
+                f"AND NOT ({STANDARDS}))"
+            )
+        if patterns:
+            parts.append("AND (" + " OR ".join(patterns) + ")")
+
     return ("\n           ".join(parts), tuple(params))
 
 

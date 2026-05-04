@@ -73,6 +73,16 @@ retrieval:
   # Phase-3 behavior — useful when debugging recall regressions).
   society_floor_min_rrf_ratio: 0.1
 
+# ---------- UI (Phase 5) ----------
+ui:
+  title: "GI Guidelines Assistant"
+  subtitle: "Grounded answers from AGA, ACG, ASGE, and AASLD"
+  default_top_k: 6
+  show_debug_toggle: true
+  phi_check:
+    enabled: true
+
+
 # ---------- Generation (Phase 4) ----------
 generation:
   model: claude-opus-4-7   # Opus for clinician-facing answers (GRADE-aware synthesis,
