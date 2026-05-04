@@ -70,7 +70,23 @@ def rerank_candidates(
         society_floor_enabled=bool(cfg.get("society_floor", True)),
         society_floor_min=int(cfg.get("society_floor_min_societies", 2)),
         society_floor_pool_size=int(cfg.get("society_floor_pool_size", 20)),
+        society_floor_min_rrf_ratio=float(
+            cfg.get("society_floor_min_rrf_ratio", 0.5)
+        ),
     )
+
+
+def _score(c: dict[str, Any]) -> float:
+    """Pick the most discriminative score available on a candidate.
+
+    Cohere relevance score is preferred when present — its dynamic range
+    cleanly separates on-topic (~0.99) from off-topic (~0.05) chunks. RRF
+    is the fallback for callers using a non-Cohere reranker (BGE branch
+    doesn't yet annotate candidates with relevance scores).
+    """
+    if "cohere_score" in c:
+        return float(c["cohere_score"])
+    return float(c.get("rrf_score") or 0.0)
 
 
 def _apply_floors(
@@ -83,6 +99,7 @@ def _apply_floors(
     society_floor_enabled: bool,
     society_floor_min: int,
     society_floor_pool_size: int,
+    society_floor_min_rrf_ratio: float = 0.5,
 ) -> list[dict[str, Any]]:
     """Apply the typed-chunk floor and the society-diversity floor.
 
@@ -100,6 +117,16 @@ def _apply_floors(
     bias toward whichever society's writing reads most like a direct
     answer to the query, so for cross-society questions we'd otherwise
     lose the dissenting-society chunk to the reranker every time.
+
+    The ``society_floor_min_rrf_ratio`` gate (default 0.5) prevents the
+    floor from promoting a chunk whose RRF score is far below the top
+    fused candidate. Without it, a question like "differential for SEL"
+    can pull a tangentially-related AGA Gastric-Polyps recommendation
+    via the floor even when no on-topic AGA chunk is in the head — the
+    typed-floor "must promote per society" mandate has no other AGA
+    typed chunk to choose from. With ratio 0.5 (typical defensible
+    default), the promoted chunk has to be within a factor of 2 of the
+    top fused score, which keeps off-topic injections out.
     """
     out = list(ranked)
     seen = {r["chunk_id"] for r in out}
@@ -107,6 +134,15 @@ def _apply_floors(
 
     def already_covers(predicate) -> bool:
         return any(predicate(r) for r in out + promotions)
+
+    # Same score-ratio gate applies to BOTH floors. Without it, the
+    # typed floor will promote whatever the top-fused chunk of a given
+    # type is — even when its cohere relevance is near zero. AGA Gastric
+    # Polyps BPA 13 had RRF rank #2 on a SEL question because of token
+    # overlap on "gastric"/"polyp"/"differential", but cohere-scored
+    # it at 0.01 — without the gate the typed-floor promoted it anyway.
+    top_score = max(_score(c) for c in candidates) if candidates else 0.0
+    min_score = society_floor_min_rrf_ratio * top_score
 
     if typed_floor_enabled:
         for etype in typed_types:
@@ -119,15 +155,19 @@ def _apply_floors(
             )
             if promoted is None:
                 continue
+            promoted_score = _score(promoted)
+            if min_score > 0 and promoted_score < min_score:
+                continue  # off-topic; don't burn a slot
             p = dict(promoted)
-            p["relevance_score"] = float(p.get("rrf_score") or 0.0)
+            p["relevance_score"] = promoted_score
             p["promoted_by"] = "typed_floor"
             promotions.append(p)
             seen.add(p["chunk_id"])
 
     if society_floor_enabled:
         # Look at the head of fused candidates (not all of them) so a
-        # society with only deep-rank chunks doesn't claim a slot.
+        # society with only deep-rank chunks doesn't claim a slot. The
+        # same min_score gate computed above applies here too.
         head = candidates[: max(society_floor_pool_size, top_k)]
         societies_in_head = []
         for c in head:
@@ -170,8 +210,16 @@ def _apply_floors(
                     )
                 if promoted is None:
                     continue
+                # Score-ratio gate: skip promotion when the candidate's
+                # score is far below the top — keeps tangential off-topic
+                # chunks (e.g. AGA Gastric-Polyps BPA on a gastroparesis
+                # question) from claiming a slot. Uses Cohere relevance
+                # when available (sharp discrimination), RRF as a fallback.
+                promoted_score = _score(promoted)
+                if min_score > 0 and promoted_score < min_score:
+                    continue
                 p = dict(promoted)
-                p["relevance_score"] = float(p.get("rrf_score") or 0.0)
+                p["relevance_score"] = promoted_score
                 p["promoted_by"] = "society_floor"
                 promotions.append(p)
                 seen.add(p["chunk_id"])
@@ -215,11 +263,21 @@ def _make_cohere_reranker() -> Reranker:
 
     def rerank(query: str, candidates: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
         docs = [r["text"] for r in candidates]
+        # Request scores for ALL candidates (Cohere bills per document, not
+        # per request, so this is the same cost as top_k=top_k). The full
+        # score map lets the floor logic gate promotions on Cohere relevance
+        # rather than RRF — Cohere's dynamic range is much wider (~0.05 for
+        # off-topic vs ~0.99 for on-topic), giving a real signal for
+        # "is this chunk close to the question?".
         resp = client.rerank(
-            query=query, documents=docs, model=model, top_n=min(top_k, len(docs)),
+            query=query, documents=docs, model=model, top_n=len(docs),
         )
-        out = []
+        # Side-channel: annotate candidates with their Cohere score so
+        # downstream code (in particular _apply_floors) can use it.
         for r in resp.results:
+            candidates[r.index]["cohere_score"] = float(r.relevance_score)
+        out = []
+        for r in resp.results[:top_k]:
             row = dict(candidates[r.index])
             row["relevance_score"] = float(r.relevance_score)
             out.append(row)

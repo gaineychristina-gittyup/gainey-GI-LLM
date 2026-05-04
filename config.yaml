@@ -58,6 +58,20 @@ retrieval:
   society_floor: true
   society_floor_min_societies: 2
   society_floor_pool_size: 20
+  # Floor promotions only fire when the candidate's score is at least this
+  # fraction of the top candidate's score. Applies to BOTH the typed floor
+  # and the society floor. Uses Cohere relevance scores when available
+  # (sharp 0-1 dynamic range), falls back to RRF (0.01-0.04 range) when not.
+  # Default 0.1 = 10% of the top score:
+  #   - For high-confidence queries (top cohere ~1.0): floor at 0.10, blocks
+  #     tangential chunks (e.g. AGA Gastric-Polyps BPA on a SEL question
+  #     scored 0.012 by cohere → blocked).
+  #   - For low-confidence queries (top cohere ~0.4, e.g. cross-society
+  #     "do they agree?" comparisons): floor at 0.04, lets cross-society
+  #     contributions through (ACG gastroparesis rec scored ~0.10 → kept).
+  # Set to 0 to disable the gate (allow all floor promotions, original
+  # Phase-3 behavior — useful when debugging recall regressions).
+  society_floor_min_rrf_ratio: 0.1
 
 # ---------- Generation (Phase 4) ----------
 generation:
