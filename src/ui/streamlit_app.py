@@ -541,10 +541,18 @@ def _check_password() -> bool:
       2. ``GI_APP_PASSWORD`` env var
     If neither is set, the gate is disabled (open access)."""
     expected = None
-    try:
-        expected = st.secrets.get("app_password")  # type: ignore[attr-defined]
-    except Exception:
-        expected = None
+    # Only consult st.secrets when a secrets.toml actually exists —
+    # otherwise Streamlit prints a noisy "No secrets found" banner at
+    # the top of the page even when we catch the exception.
+    secrets_paths = [
+        Path.home() / ".streamlit" / "secrets.toml",
+        REPO_ROOT / ".streamlit" / "secrets.toml",
+    ]
+    if any(p.exists() for p in secrets_paths):
+        try:
+            expected = st.secrets.get("app_password")  # type: ignore[attr-defined]
+        except Exception:
+            expected = None
     if not expected:
         expected = os.environ.get("GI_APP_PASSWORD")
     if not expected:
