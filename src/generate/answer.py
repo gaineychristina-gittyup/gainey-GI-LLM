@@ -161,12 +161,20 @@ def _extract_cited_indices(text: str) -> list[int]:
 
 
 def _citation_record(chunk: dict[str, Any], idx: int) -> dict[str, Any]:
-    """Trim a chunk to the fields a citation footnote needs."""
+    """Trim a chunk to the fields a citation footnote needs.
+
+    Includes everything the UI's source-viewer pane needs to render the
+    cited content directly (full text, structured table HTML, figure
+    image path) plus the IDs needed to deep-link back to the source PDF.
+    """
     return {
         "n": idx,
+        "chunk_id": chunk.get("chunk_id"),
+        "document_id": chunk.get("document_id"),
         "society": chunk.get("society"),
         "year": chunk.get("year"),
         "title": chunk.get("title"),
+        "section_title": chunk.get("section_title"),
         "page_start": chunk.get("page_start"),
         "page_end": chunk.get("page_end"),
         "recommendation_id": chunk.get("recommendation_id"),
@@ -175,4 +183,8 @@ def _citation_record(chunk: dict[str, Any], idx: int) -> dict[str, Any]:
         "element_type": chunk.get("element_type"),
         "doi": chunk.get("doi"),
         "source_url": chunk.get("source_url"),
+        # Full source content for in-UI rendering.
+        "text": chunk.get("text"),
+        "table_html": chunk.get("table_html"),
+        "figure_image_path": chunk.get("figure_image_path"),
     }
