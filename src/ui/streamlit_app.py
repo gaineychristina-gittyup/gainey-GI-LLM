@@ -26,6 +26,7 @@ appended to logs/qa_log.jsonl for offline review.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import time
@@ -527,10 +528,50 @@ def render_main_page() -> None:
     render_footer()
 
 
+# --- password gate ---------------------------------------------------------
+
+
+def _check_password() -> bool:
+    """Single shared password gate. Returns True once the user has entered
+    the correct password this session.
+
+    Password source (in priority order):
+      1. ``st.secrets["app_password"]``  (preferred — set in
+         ``.streamlit/secrets.toml`` or Streamlit Cloud's Secrets UI)
+      2. ``GI_APP_PASSWORD`` env var
+    If neither is set, the gate is disabled (open access)."""
+    expected = None
+    try:
+        expected = st.secrets.get("app_password")  # type: ignore[attr-defined]
+    except Exception:
+        expected = None
+    if not expected:
+        expected = os.environ.get("GI_APP_PASSWORD")
+    if not expected:
+        return True
+
+    if st.session_state.get("authed"):
+        return True
+
+    st.title("GaineyGuidelines")
+    with st.form("login"):
+        pw = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in")
+    if submitted:
+        if hmac.compare_digest(pw, expected):
+            st.session_state["authed"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
+
+
 # --- multi-page setup -------------------------------------------------------
 
 
 def main() -> None:
+    if not _check_password():
+        return
     # default=True triggers an internal ``_default`` attribute access on
     # streamlit 1.40.x that crashes; positional ordering already makes the
     # first page the default, so we just rely on that.
