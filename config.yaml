@@ -3,11 +3,14 @@
 
 # ---------- Embeddings ----------
 embedding:
-  # "voyage" or "openai". The chosen provider must match the schema dimension.
+  # "voyage" | "openai" | "bge". The chosen provider must match the schema
+  # dimension AND must match what produced the chunks.embedding column —
+  # swapping providers without re-ingesting silently produces nonsense scores.
   provider: voyage
-  voyage_model: voyage-3-large       # 1024-dim, retrieval-tuned
-  openai_model: text-embedding-3-large  # 3072-dim, fallback only
-  batch_size: 100                    # Voyage hard cap is 128; keep some headroom
+  voyage_model: voyage-3-large            # 1024-dim, retrieval-tuned (project default)
+  openai_model: text-embedding-3-large    # 3072-dim, fallback only
+  bge_model: BAAI/bge-large-en-v1.5       # 1024-dim, local CPU/GPU; same dim as voyage
+  batch_size: 100                         # Voyage hard cap is 128; keep some headroom
 
 # ---------- Chunking ----------
 # These knobs are the most worth tuning once you eyeball Phase 2 output.
@@ -28,15 +31,29 @@ parsing:
 
 # ---------- Retrieval (Phase 3) ----------
 retrieval:
-  top_k_dense: 20          # vector candidates pulled from pgvector
-  top_k_bm25: 20           # keyword candidates from Postgres FTS
-  rerank_top_n: 8          # final passages handed to the LLM after Cohere rerank
-  reranker_provider: cohere  # "cohere" or "bge_local"
+  top_k_dense: 60          # vector candidates pulled from pgvector
+  top_k_bm25: 60           # keyword candidates from Postgres FTS
+  # When True (default) and the caller didn't already filter by element_types,
+  # we run an extra dense+BM25 pass restricted to typed chunks (table /
+  # recommendation / key_concept) and union those into RRF as additional
+  # ranked lists. This keeps the answer chunk findable when the table-row text
+  # ("col1 | col2 | ...") doesn't outscore a rationale paragraph in the open
+  # pool — the situation that bit the LGD-surveillance probe.
+  boost_typed_chunks: true
+  n_typed_dense: 20
+  n_typed_bm25: 20
+  n_fused: 20              # candidates kept after RRF fusion, fed to the reranker
+  top_k: 6                 # final passages returned to the caller (Phase 4 generator)
+  rerank_top_n: 6          # alias of top_k kept for older call sites
+  reranker_provider: cohere  # "cohere" (API) | "bge" (local cross-encoder)
   cohere_model: rerank-english-v3.0
+  bge_reranker_model: BAAI/bge-reranker-v2-m3  # only used when reranker_provider=bge
 
 # ---------- Generation (Phase 4) ----------
 generation:
-  model: claude-sonnet-4-5
+  model: claude-opus-4-7   # Opus for clinician-facing answers (GRADE-aware synthesis,
+                           # cross-society disagreement, careful refusal). Drop to
+                           # claude-sonnet-4-6 for batch eval / large-N runs.
   max_tokens: 1500
   temperature: 0.0         # deterministic; we want grounded extraction, not creativity
   # Strict-grounding system prompt lives in src/generate/ (built in Phase 4).
