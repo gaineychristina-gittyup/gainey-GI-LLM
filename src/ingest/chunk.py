@@ -96,6 +96,21 @@ GRADE_EVIDENCE_RE = re.compile(
 # Sentence-terminator boundary used when forced to split inside a paragraph.
 SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z(])")
 
+# Real figure captions in society guidelines start with "Figure N." or "Fig. N.".
+# unstructured over-fires FigureCaption on small inline icons / pull-quote
+# graphics / margin furniture (e.g. ASGE Cholangitis 2021 emitted 82 figure
+# captions). Demote anything not matching this shape to prose.
+FIGURE_CAPTION_RE = re.compile(
+    r"^\s*(?:Figure|Fig\.?|FIGURE)\s+\d+[A-Za-z]?\s*[.:]",
+)
+
+# Single-character "Title" elements that come from vertical-margin runs
+# ("G U I D E L I N E S" letters along the page edge) — each one creates
+# a fake section under _group_into_sections, defeating short-chunk merging.
+# We drop them; legitimate Roman-numeral / chapter-letter headings are 3+
+# chars or include punctuation.
+_TITLE_GARBAGE_RE = re.compile(r"^[A-Z]{1,2}$")
+
 
 @dataclass
 class Chunk:
@@ -204,6 +219,16 @@ def chunk_elements(
 # --- Internals --------------------------------------------------------------
 
 
+def _is_garbage_title(text: str) -> bool:
+    """Detect single/double-letter "Title" elements that are vertical-margin
+    glyph artifacts (e.g. the letters of 'G U I D E L I N E S' running down
+    the page edge), not real section headings. Each one would otherwise open
+    a new section that the same-section merge can't bridge.
+    """
+    s = text.strip()
+    return bool(_TITLE_GARBAGE_RE.match(s))
+
+
 def _group_into_sections(
     elements: list[ParsedElement],
 ) -> list[tuple[Optional[str], list[ParsedElement]]]:
@@ -211,13 +236,15 @@ def _group_into_sections(
 
     Returns a list of (section_title, [elements]) tuples in document order.
     Anything before the first Title goes under ``section_title=None``.
+    Single-character / 2-uppercase-letter Title elements are skipped (treated
+    as if they didn't exist) — see :func:`_is_garbage_title`.
     """
     sections: list[tuple[Optional[str], list[ParsedElement]]] = []
     current_title: Optional[str] = None
     current: list[ParsedElement] = []
 
     for el in elements:
-        if el.category == "Title":
+        if el.category == "Title" and not _is_garbage_title(el.text):
             if current:
                 sections.append((current_title, current))
                 current = []
@@ -226,6 +253,9 @@ def _group_into_sections(
             # can match on heading text.
             current.append(el)
         else:
+            # Garbage titles fall through to here too — they get appended as
+            # ordinary elements so any tokens they contain aren't lost, but
+            # they do NOT open a new section.
             current.append(el)
 
     if current:
@@ -239,11 +269,21 @@ def _classify_element(elem: ParsedElement) -> str:
     Order matters: a table-of-recommendations is a Table element first; a
     Key Concept block is detected before Recommendation because some societies
     (notably ACG) put both kinds of labeled blocks side-by-side.
+
+    FigureCaption / Image elements only earn the 'figure_caption' label when
+    their text actually opens with "Figure N." or "Fig N.". Without this
+    filter, unstructured over-fires Image/FigureCaption on small inline icons,
+    table separators, and pull-quote graphics — the ASGE Cholangitis 2021
+    PDF produced 82 figure captions before this filter, ~6 after.
     """
     if elem.category == "Table":
         return "table"
     if elem.category in ("FigureCaption", "Image"):
-        return "figure_caption"
+        if FIGURE_CAPTION_RE.match(elem.text or ""):
+            return "figure_caption"
+        # Spurious figure detection — treat as prose so any text content
+        # is still embedded but doesn't claim a figure_caption slot.
+        return "prose"
     head = elem.text[:200]
     if KEY_CONCEPT_RE.search(head):
         return "key_concept"
@@ -252,6 +292,57 @@ def _classify_element(elem: ParsedElement) -> str:
     if elem.category == "ListItem" and GRADE_STRENGTH_RE.search(head):
         return "recommendation"
     return "prose"
+
+
+_TR_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.DOTALL | re.IGNORECASE)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _extract_table_row_recommendations(
+    table_html: Optional[str],
+    page_number: Optional[int],
+    section_title: Optional[str],
+    tokenizer: str,
+) -> list[Chunk]:
+    """For tables that contain a "Recommendation N" / "Statement N" / "BPA N"
+    / "Quality Indicator N" / "Key Concept N" labeled row, emit each such row
+    as its own typed chunk so it's individually retrievable and carries
+    GRADE metadata.
+
+    The original table chunk is kept as well — it's the parent for UI
+    rendering. The row chunks live alongside it in the chunks table.
+
+    AGA pharmacological-management guidelines (IBS-D, IBS-C, UC-pharm)
+    layout their recommendations as table rows; before this pass, the only
+    chunk surfacing in retrieval was the cell-flattened table text and
+    individual recommendation_id metadata was never populated.
+    """
+    if not table_html:
+        return []
+    out: list[Chunk] = []
+    for row_html in _TR_RE.findall(table_html):
+        text = _TAG_RE.sub(" ", row_html)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            continue
+        head = text[:200]
+        if KEY_CONCEPT_RE.search(head):
+            etype = "key_concept"
+        elif RECOMMENDATION_RE.search(head):
+            etype = "recommendation"
+        else:
+            continue
+        out.append(
+            Chunk(
+                text=text,
+                section_title=section_title,
+                page_start=page_number,
+                page_end=page_number,
+                token_count=count_tokens(text, tokenizer),
+                element_type=etype,
+            )
+        )
+    return out
 
 
 def _table_to_plain_text(html: Optional[str], fallback_text: str) -> str:
@@ -340,6 +431,14 @@ def _chunk_section(
                     token_count=count_tokens(text_for_embedding, tokenizer),
                     element_type="table",
                     table_html=el.table_html,
+                )
+            )
+            # If the table contains "Recommendation N" / "Statement N" / "BPA N"
+            # / "Key Concept N" rows, also emit each row as a typed chunk so
+            # individual recs are retrievable with their own GRADE metadata.
+            chunks.extend(
+                _extract_table_row_recommendations(
+                    el.table_html, el.page_number, section_title, tokenizer,
                 )
             )
             continue
