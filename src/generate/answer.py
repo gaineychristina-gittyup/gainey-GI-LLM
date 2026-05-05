@@ -51,6 +51,7 @@ def answer(
     filters: dict[str, Any] | None = None,
     top_k: int | None = None,
     rerank: bool = True,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Run retrieve → Claude → return a structured answer.
 
@@ -66,7 +67,7 @@ def answer(
     """
     cfg = _load_config()
     gen_cfg = cfg.get("generation", {})
-    model = gen_cfg.get("model", "claude-sonnet-4-5")
+    model = model or gen_cfg.get("model", "claude-sonnet-4-5")
     max_tokens = int(gen_cfg.get("max_tokens", 1500))
     temperature = float(gen_cfg.get("temperature", 0.0))
 

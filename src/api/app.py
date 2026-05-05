@@ -64,6 +64,10 @@ class AnswerRequest(BaseModel):
     stream: bool = False
     conversation_id: Optional[int] = None
     save: bool = True
+    # Optional override of the generation model; falls back to config.yaml
+    # generation.model. Currently must be a Claude model id; multi-provider
+    # support is planned but not yet wired.
+    model: Optional[str] = None
 
 
 class NewConversationRequest(BaseModel):
@@ -129,6 +133,7 @@ def answer_endpoint(req: AnswerRequest):
             final: dict[str, Any] | None = None
             for ev in answer_stream(
                 req.query, filters=filters, top_k=req.top_k, rerank=req.rerank,
+                model=req.model,
             ):
                 if ev["type"] == "done":
                     final = ev["result"]
@@ -143,6 +148,7 @@ def answer_endpoint(req: AnswerRequest):
 
     out = answer(
         req.query, filters=filters, top_k=req.top_k, rerank=req.rerank,
+        model=req.model,
     )
     if req.save and req.conversation_id is not None:
         history.save_turn(req.conversation_id, req.query, out)

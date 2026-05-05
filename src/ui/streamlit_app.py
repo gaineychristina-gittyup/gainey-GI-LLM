@@ -85,6 +85,14 @@ def load_ui_config() -> dict[str, Any]:
     return cfg.get("ui") or {}
 
 
+@st.cache_resource
+def load_generation_config() -> dict[str, Any]:
+    """Read the `generation` block of config.yaml — used for the model picker."""
+    with open(CONFIG_PATH) as f:
+        cfg = yaml.safe_load(f) or {}
+    return cfg.get("generation") or {}
+
+
 # --- topic list ------------------------------------------------------------
 
 
@@ -112,10 +120,11 @@ def fetch_topics() -> list[str]:
 
 def call_answer(
     query: str, filters: dict[str, Any], top_k: int,
+    model: str | None = None,
 ) -> dict[str, Any] | None:
     """POST /answer (non-streaming). Returns the answer dict or None on
     failure, with the failure already surfaced to the user."""
-    payload = {
+    payload: dict[str, Any] = {
         "query": query,
         "filters": filters or None,
         "top_k": top_k,
@@ -123,6 +132,8 @@ def call_answer(
         "stream": False,
         "save": False,  # Phase 5 doesn't use server-side conversation history
     }
+    if model:
+        payload["model"] = model
     try:
         r = requests.post(f"{API_BASE}/answer", json=payload, timeout=300)
         r.raise_for_status()
@@ -228,6 +239,32 @@ def render_main_page() -> None:
             value=default_top_k,
             help="More passages = broader context but more noise.",
         )
+
+        # Model picker — pulled from config.yaml `generation.available_models`.
+        gen_cfg = load_generation_config()
+        available = gen_cfg.get("available_models") or []
+        default_model_id = gen_cfg.get("model")
+        model_id: str | None = None
+        if available:
+            ids = [m["id"] for m in available]
+            labels = {m["id"]: m.get("label", m["id"]) for m in available}
+            try:
+                default_idx = ids.index(default_model_id) if default_model_id in ids else 0
+            except ValueError:
+                default_idx = 0
+            model_id = st.selectbox(
+                "Model",
+                options=ids,
+                index=default_idx,
+                format_func=lambda i: labels.get(i, i),
+                help=(
+                    "Switches the Claude model used to write the answer. "
+                    "Retrieval is unchanged; only the synthesis step changes. "
+                    "Cheaper models are faster but more terse — Opus is the "
+                    "clinician-facing default."
+                ),
+            )
+
         show_prompt = False
         if show_debug:
             show_prompt = st.toggle(
@@ -302,7 +339,7 @@ def render_main_page() -> None:
         # 3) Call backend
         with st.spinner("Retrieving and generating..."):
             t0 = time.time()
-            result = call_answer(question, filters, top_k)
+            result = call_answer(question, filters, top_k, model=model_id)
             elapsed = time.time() - t0
         if result is None:
             return

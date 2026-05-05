@@ -88,6 +88,16 @@ generation:
   model: claude-opus-4-7   # Opus for clinician-facing answers (GRADE-aware synthesis,
                            # cross-society disagreement, careful refusal). Drop to
                            # claude-sonnet-4-6 for batch eval / large-N runs.
+  # Models exposed in the UI's model picker. The first entry is shown as the
+  # default selection; the API still falls back to `model` above if no
+  # override is sent.
+  available_models:
+    - id: claude-opus-4-7
+      label: "Opus 4.7 — best (clinician-facing)"
+    - id: claude-sonnet-4-6
+      label: "Sonnet 4.6 — faster, ~5x cheaper"
+    - id: claude-haiku-4-5
+      label: "Haiku 4.5 — fastest, cheapest"
   max_tokens: 1500
   temperature: 0.0         # deterministic; we want grounded extraction, not creativity
   # Strict-grounding system prompt lives in src/generate/ (built in Phase 4).

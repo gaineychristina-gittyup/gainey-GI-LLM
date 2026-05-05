@@ -33,6 +33,7 @@ def answer_stream(
     filters: dict[str, Any] | None = None,
     top_k: int | None = None,
     rerank: bool = True,
+    model: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield streaming token events plus a final ``done`` event.
 
@@ -42,7 +43,7 @@ def answer_stream(
     """
     cfg = _load_config()
     gen_cfg = cfg.get("generation", {})
-    model = gen_cfg.get("model", "claude-sonnet-4-5")
+    model = model or gen_cfg.get("model", "claude-sonnet-4-5")
     max_tokens = int(gen_cfg.get("max_tokens", 1500))
     temperature = float(gen_cfg.get("temperature", 0.0))
 
