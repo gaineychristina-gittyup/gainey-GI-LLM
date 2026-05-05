@@ -33,6 +33,7 @@ def answer_stream(
     filters: dict[str, Any] | None = None,
     top_k: int | None = None,
     rerank: bool = True,
+    history: list[dict[str, str]] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield streaming token events plus a final ``done`` event.
 
@@ -71,6 +72,16 @@ def answer_stream(
     user_msg = build_user_message(question, chunks)
     client = _get_anthropic_client()
 
+    messages: list[dict[str, Any]] = []
+    for turn in history or []:
+        prev_q = (turn.get("question") or "").strip()
+        prev_a = (turn.get("answer") or "").strip()
+        if not prev_q or not prev_a:
+            continue
+        messages.append({"role": "user", "content": f"QUESTION: {prev_q}"})
+        messages.append({"role": "assistant", "content": prev_a})
+    messages.append({"role": "user", "content": user_msg})
+
     create_kwargs: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
@@ -79,7 +90,7 @@ def answer_stream(
             "text": SYSTEM_PROMPT,
             "cache_control": {"type": "ephemeral"},
         }],
-        "messages": [{"role": "user", "content": user_msg}],
+        "messages": messages,
     }
     if not _model_rejects_temperature(model):
         create_kwargs["temperature"] = temperature

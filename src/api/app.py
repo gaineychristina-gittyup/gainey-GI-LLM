@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # ANTHROPIC_API_KEY / VOYAGE_API_KEY / COHERE_API_KEY at first call.
 load_dotenv(REPO_ROOT / ".env")
 
+from src.api import feedback as feedback_mod  # noqa: E402
 from src.api import history  # noqa: E402
 from src.generate import answer, answer_stream  # noqa: E402
 from src.retrieve import retrieve  # noqa: E402
@@ -56,6 +57,11 @@ class RetrieveRequest(BaseModel):
     rerank: bool = True
 
 
+class HistoryTurn(BaseModel):
+    question: str
+    answer: str
+
+
 class AnswerRequest(BaseModel):
     query: str
     filters: Optional[Filters] = None
@@ -64,10 +70,25 @@ class AnswerRequest(BaseModel):
     stream: bool = False
     conversation_id: Optional[int] = None
     save: bool = True
+    history: Optional[list[HistoryTurn]] = None
 
 
 class NewConversationRequest(BaseModel):
     title: Optional[str] = None
+
+
+class FeedbackRequest(BaseModel):
+    category: str = Field(
+        description=(
+            "wrong_answer | missing_source | wrongly_refused | ui_bug | other"
+        ),
+    )
+    description: str = Field(min_length=3, max_length=4000)
+    contact: Optional[str] = Field(default=None, max_length=200)
+    conversation_id: Optional[int] = None
+    question: Optional[str] = None
+    answer: Optional[str] = None
+    context: Optional[dict[str, Any]] = None
 
 
 # --- helpers ---------------------------------------------------------------
@@ -123,12 +144,16 @@ def retrieve_endpoint(req: RetrieveRequest) -> dict[str, Any]:
 @app.post("/answer")
 def answer_endpoint(req: AnswerRequest):
     filters = _filters_dict(req.filters)
+    hist = (
+        [t.model_dump() for t in req.history] if req.history else None
+    )
 
     if req.stream:
         def event_source():
             final: dict[str, Any] | None = None
             for ev in answer_stream(
                 req.query, filters=filters, top_k=req.top_k, rerank=req.rerank,
+                history=hist,
             ):
                 if ev["type"] == "done":
                     final = ev["result"]
@@ -143,12 +168,35 @@ def answer_endpoint(req: AnswerRequest):
 
     out = answer(
         req.query, filters=filters, top_k=req.top_k, rerank=req.rerank,
+        history=hist,
     )
     if req.save and req.conversation_id is not None:
         history.save_turn(req.conversation_id, req.query, out)
     out = dict(out)
     out["chunks"] = [_strip_embedding(c) for c in out.get("chunks", [])]
     return out
+
+
+@app.post("/feedback")
+def submit_feedback_endpoint(req: FeedbackRequest) -> dict[str, Any]:
+    """Persist a user error report. The triage_hint in the response is
+    shown by the UI so the reporter sees what we'll do with it."""
+    return feedback_mod.submit_feedback(
+        category=req.category,
+        description=req.description,
+        contact=req.contact,
+        conversation_id=req.conversation_id,
+        question=req.question,
+        answer=req.answer,
+        context=req.context,
+    )
+
+
+@app.get("/feedback")
+def list_feedback_endpoint(
+    limit: int = 100, status: Optional[str] = None,
+) -> dict[str, Any]:
+    return {"reports": feedback_mod.list_feedback(limit=limit, status=status)}
 
 
 @app.post("/conversations")

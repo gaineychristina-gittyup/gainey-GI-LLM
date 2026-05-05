@@ -51,8 +51,16 @@ def answer(
     filters: dict[str, Any] | None = None,
     top_k: int | None = None,
     rerank: bool = True,
+    history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Run retrieve → Claude → return a structured answer.
+
+    ``history`` is an optional list of prior turns ``[{"question": ...,
+    "answer": ...}, ...]`` (oldest first). When provided, the prior turns
+    are appended as alternating user/assistant messages so Claude can
+    resolve follow-up references like "what about for ACG?" against the
+    earlier context. Retrieval still runs only on ``question`` — we don't
+    re-retrieve for prior turns.
 
     Returns a dict:
         {
@@ -88,6 +96,16 @@ def answer(
     user_msg = build_user_message(question, chunks)
     client = _get_anthropic_client()
 
+    messages: list[dict[str, Any]] = []
+    for turn in history or []:
+        prev_q = (turn.get("question") or "").strip()
+        prev_a = (turn.get("answer") or "").strip()
+        if not prev_q or not prev_a:
+            continue
+        messages.append({"role": "user", "content": f"QUESTION: {prev_q}"})
+        messages.append({"role": "assistant", "content": prev_a})
+    messages.append({"role": "user", "content": user_msg})
+
     # Claude Opus 4.7 (and other 4.x extended-thinking-class models) reject
     # the temperature parameter. We pass it for older models only.
     create_kwargs = {
@@ -100,7 +118,7 @@ def answer(
             "text": SYSTEM_PROMPT,
             "cache_control": {"type": "ephemeral"},
         }],
-        "messages": [{"role": "user", "content": user_msg}],
+        "messages": messages,
     }
     if not _model_rejects_temperature(model):
         create_kwargs["temperature"] = temperature
