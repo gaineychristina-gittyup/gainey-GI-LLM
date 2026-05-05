@@ -83,6 +83,16 @@ retrieval:
   query_expansion:
     enabled: true
     n_variants: 3
+  # --- Second-pass intent reranker (Haiku) ---
+  # When enabled, after Cohere reranks the fused pool, Haiku re-reads the
+  # top n_candidates and reorders them by clinical-intent fit (right
+  # population, right scenario), not just keyword/structural similarity.
+  # Catches cases where the dense paragraph that actually answers the
+  # question scores lower than guideline-formal prose that's only
+  # tangentially relevant. Cost: ~$0.005 + ~1s per query (Haiku).
+  llm_rerank:
+    enabled: true
+    n_candidates: 12
 
 # ---------- UI (Phase 5) ----------
 ui:

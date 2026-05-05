@@ -63,6 +63,23 @@ def rerank_candidates(
     if top_k is None:
         top_k = int(cfg.get("top_k", 6))
     ranked = _get_reranker(provider)(query, candidates, top_k)
+
+    # Optional second-pass intent rerank (Haiku). Cohere is the precision
+    # filter; Haiku reorders the top-N by clinical intent.
+    llm_cfg = cfg.get("llm_rerank", {}) or {}
+    if llm_cfg.get("enabled", False):
+        from src.retrieve.llm_rerank import llm_rerank_intent
+
+        n_pool = int(llm_cfg.get("n_candidates", 12))
+        # Cohere annotates cohere_score on every candidate (full pool, not
+        # just top_k), so passing the full candidate list lets Haiku pull
+        # a buried-but-correct chunk up into top_k.
+        reordered = llm_rerank_intent(
+            query, candidates, top_k=top_k, n_candidates=n_pool,
+        )
+        if reordered:
+            ranked = reordered
+
     return _apply_floors(
         candidates, ranked, top_k,
         typed_types=tuple(cfg.get("typed_floor_types", ("table", "recommendation"))),
