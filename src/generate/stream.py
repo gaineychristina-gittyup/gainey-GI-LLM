@@ -50,7 +50,15 @@ def answer_stream(
     rcfg = cfg.get("retrieval", {})
     top_k = int(top_k or rcfg.get("top_k", 6))
 
-    chunks = retrieve(question, filters=filters, top_k=top_k, rerank=rerank)
+    retrieval_query = question
+    if history:
+        try:
+            from src.generate.contextualize import standalone_query
+            retrieval_query = standalone_query(question, history)
+        except Exception:
+            pass
+
+    chunks = retrieve(retrieval_query, filters=filters, top_k=top_k, rerank=rerank)
     if not chunks:
         yield {
             "type": "done",

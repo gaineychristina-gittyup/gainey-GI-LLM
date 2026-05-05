@@ -81,7 +81,19 @@ def answer(
     rcfg = cfg.get("retrieval", {})
     top_k = int(top_k or rcfg.get("top_k", 6))
 
-    chunks = retrieve(question, filters=filters, top_k=top_k, rerank=rerank)
+    # When history is present, fold it into a standalone retrieval query so
+    # follow-ups like "what about for ACG?" hit the right corpus context.
+    # The user's original phrasing still goes to Claude — only retrieval
+    # uses the contextualized query.
+    retrieval_query = question
+    if history:
+        try:
+            from src.generate.contextualize import standalone_query
+            retrieval_query = standalone_query(question, history)
+        except Exception as e:
+            logger.warning("contextualize skipped: %s", e)
+
+    chunks = retrieve(retrieval_query, filters=filters, top_k=top_k, rerank=rerank)
     if not chunks:
         return {
             "answer": "The provided guidelines do not directly address this. "
