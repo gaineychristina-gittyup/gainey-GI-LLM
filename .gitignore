@@ -25,6 +25,9 @@ data/raw_pdfs/
 data/parsed/
 data/logs/
 
+# Runtime logs (qa_log.jsonl, feedback_log.jsonl) — local-only
+logs/
+
 # OS
 .DS_Store
 Thumbs.db

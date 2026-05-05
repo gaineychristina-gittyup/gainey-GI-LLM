@@ -111,7 +111,12 @@ def fetch_topics() -> list[str]:
 
 
 def call_answer(
-    query: str, filters: dict[str, Any], top_k: int,
+    query: str,
+    filters: dict[str, Any],
+    top_k: int,
+    *,
+    history: list[dict[str, str]] | None = None,
+    conversation_id: int | None = None,
 ) -> dict[str, Any] | None:
     """POST /answer (non-streaming). Returns the answer dict or None on
     failure, with the failure already surfaced to the user."""
@@ -121,7 +126,9 @@ def call_answer(
         "top_k": top_k,
         "rerank": True,
         "stream": False,
-        "save": False,  # Phase 5 doesn't use server-side conversation history
+        "save": conversation_id is not None,
+        "conversation_id": conversation_id,
+        "history": history or None,
     }
     try:
         r = requests.post(f"{API_BASE}/answer", json=payload, timeout=300)
@@ -138,6 +145,43 @@ def call_answer(
         st.error(
             f"Could not reach the backend at {API_BASE}. Is `uvicorn "
             f"src.api.app:app` running? ({type(e).__name__})"
+        )
+        return None
+
+
+def create_conversation(title: str | None = None) -> int | None:
+    """POST /conversations to start a server-side conversation. Returns the
+    new id, or None on failure (we degrade gracefully — the UI still works
+    without a server-side row, just without persistence across reloads)."""
+    try:
+        r = requests.post(
+            f"{API_BASE}/conversations",
+            json={"title": title},
+            timeout=10,
+        )
+        r.raise_for_status()
+        return int(r.json().get("id"))
+    except requests.RequestException:
+        return None
+
+
+def submit_feedback(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """POST /feedback. Returns the triage record on success, None on error
+    (already surfaced via st.error)."""
+    try:
+        r = requests.post(f"{API_BASE}/feedback", json=payload, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except requests.HTTPError as e:
+        st.error(
+            f"Couldn't submit the report (HTTP {e.response.status_code}). "
+            "Please try again, or copy your description and email it."
+        )
+        return None
+    except requests.RequestException as e:
+        st.error(
+            f"Couldn't reach the backend at {API_BASE} to submit the report "
+            f"({type(e).__name__}). Your description is preserved in the form."
         )
         return None
 
@@ -182,6 +226,151 @@ EXAMPLE_QUESTIONS = [
 ]
 
 
+def _render_turn(turn: dict[str, Any], turn_idx: int, *, show_prompt: bool) -> None:
+    """Render one turn (question header, answer, citation badge, passages)."""
+    question = turn.get("question", "")
+    result = turn.get("result") or {}
+    elapsed = turn.get("elapsed_s")
+
+    st.markdown(f"#### Q{turn_idx + 1}.  {question}")
+    if result.get("refused"):
+        st.warning(
+            "**The corpus didn't cover this question directly.** "
+            "Try broadening filters (more societies / years), rephrasing "
+            "with different terms, or asking about a related published "
+            "topic."
+        )
+    st.markdown(
+        render_inline_citations(result.get("answer", "")),
+        unsafe_allow_html=True,
+    )
+    render_citation_badge(result.get("verification") or {})
+
+    chunks = result.get("chunks") or []
+    cited_indices = {c.get("n") for c in (result.get("citations") or [])}
+    if chunks:
+        with st.expander(
+            f"Retrieved passages — {len(chunks)} retrieved, "
+            f"{len(cited_indices)} cited"
+            + (f" · {elapsed:.1f}s" if elapsed else ""),
+            expanded=False,
+        ):
+            for i, chunk in enumerate(chunks, start=1):
+                render_passage_card(
+                    chunk, rank=i, was_cited=(i in cited_indices),
+                )
+
+    if show_prompt:
+        with st.expander("Debug — SOURCES block", expanded=False):
+            from src.generate.prompt import build_user_message
+            st.code(build_user_message(question, chunks), language="markdown")
+
+
+def _render_feedback_form(
+    *,
+    conversation_id: int | None,
+    last_turn: dict[str, Any] | None,
+) -> None:
+    """Sidebar/expander form letting the user submit an error report.
+
+    Pre-fills hidden context (last question, last answer, retrieved chunk
+    ids, verification flags, filter state) so the developer triaging the
+    report has the same view the user did.
+    """
+    with st.expander("🐞 Report a problem", expanded=False):
+        st.caption(
+            "Tell us what went wrong. The most recent question and answer "
+            "are attached automatically so we can reproduce the issue."
+        )
+        with st.form("feedback_form", clear_on_submit=True):
+            category = st.selectbox(
+                "What's the issue?",
+                options=[
+                    ("wrong_answer", "Answer is wrong or misleading"),
+                    ("missing_source",
+                     "A guideline I expected wasn't cited or retrieved"),
+                    ("wrongly_refused",
+                     "It refused but the corpus does cover this"),
+                    ("ui_bug", "UI / display bug"),
+                    ("other", "Something else"),
+                ],
+                format_func=lambda x: x[1],
+            )
+            description = st.text_area(
+                "Describe what went wrong",
+                height=120,
+                placeholder=(
+                    "e.g. The answer cited only ACG, but the AGA 2024 "
+                    "gastroparesis guideline has a Recommendation 4 that "
+                    "directly addresses metoclopramide and should have "
+                    "been retrieved."
+                ),
+            )
+            contact = st.text_input(
+                "Email (optional — only if you want a follow-up)",
+                placeholder="you@example.com",
+            )
+            attach_last = st.checkbox(
+                "Attach the most recent Q&A to this report",
+                value=True,
+                disabled=last_turn is None,
+                help=(
+                    "When checked, the question, answer, retrieved chunk "
+                    "ids, citation list, and active filters are sent with "
+                    "the report so the team can reproduce the issue."
+                ),
+            )
+            submitted = st.form_submit_button("Submit report", type="primary")
+
+        if submitted:
+            if not description.strip():
+                st.error("Please describe what went wrong.")
+                return
+
+            payload: dict[str, Any] = {
+                "category": category[0],
+                "description": description.strip(),
+                "contact": contact.strip() or None,
+                "conversation_id": conversation_id,
+            }
+            if attach_last and last_turn is not None:
+                result = last_turn.get("result") or {}
+                chunk_ids = [
+                    c.get("chunk_id")
+                    for c in (result.get("chunks") or [])
+                ]
+                payload["question"] = last_turn.get("question")
+                payload["answer"] = result.get("answer")
+                payload["context"] = {
+                    "filters": last_turn.get("filters") or {},
+                    "top_k": last_turn.get("top_k"),
+                    "chunk_ids": chunk_ids,
+                    "citations": result.get("citations") or [],
+                    "verification": result.get("verification") or {},
+                    "model": result.get("model"),
+                    "refused": bool(result.get("refused")),
+                    "elapsed_s": last_turn.get("elapsed_s"),
+                }
+
+            with st.spinner("Submitting report..."):
+                triage = submit_feedback(payload)
+            if triage is None:
+                return
+
+            append_qa_log({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "event": "feedback",
+                "report_id": triage.get("report_id"),
+                "category": triage.get("category"),
+                "conversation_id": conversation_id,
+            })
+
+            st.success(
+                f"Report **{triage.get('report_id')}** received. "
+                f"{triage.get('triage_hint', '')}"
+            )
+
+
 def render_main_page() -> None:
     cfg = load_ui_config()
     title = cfg.get("title", "GI Guidelines Assistant")
@@ -195,8 +384,32 @@ def render_main_page() -> None:
 
     render_corpus_snapshot_header(title, subtitle)
 
+    # --- session state ----
+    if "turns" not in st.session_state:
+        st.session_state.turns = []  # list[dict]: {question, result, filters, top_k, elapsed_s}
+    if "conversation_id" not in st.session_state:
+        st.session_state.conversation_id = None
+
     # --- sidebar filters ----
     with st.sidebar:
+        st.subheader("Conversation")
+        n_turns = len(st.session_state.turns)
+        if n_turns:
+            st.caption(
+                f"{n_turns} turn{'s' if n_turns != 1 else ''} in this thread"
+                + (
+                    f" · id #{st.session_state.conversation_id}"
+                    if st.session_state.conversation_id else ""
+                )
+            )
+            if st.button("🗑 Start new conversation", use_container_width=True):
+                st.session_state.turns = []
+                st.session_state.conversation_id = None
+                st.rerun()
+        else:
+            st.caption("No turns yet — ask a question to begin.")
+
+        st.markdown("---")
         st.subheader("Filters")
         society_sel = st.multiselect(
             "Society", options=["AGA", "ACG", "ASGE", "AASLD"],
@@ -234,53 +447,76 @@ def render_main_page() -> None:
                 "Show full prompt sent to Claude", value=False,
                 help="Debug view: dumps the SOURCES block and system prompt.",
             )
+
+        st.markdown("---")
+        _render_feedback_form(
+            conversation_id=st.session_state.conversation_id,
+            last_turn=(
+                st.session_state.turns[-1] if st.session_state.turns else None
+            ),
+        )
+
         st.markdown("---")
         st.caption(
             f"Backend: `{API_BASE}` · "
             f"Snapshot: {read_corpus_snapshot()}"
         )
 
-    # --- main area ----
-    st.subheader("Ask a question")
-    with st.form("question_form", clear_on_submit=False):
+    # --- main area: input form ----
+    is_followup = bool(st.session_state.turns)
+    st.subheader("Follow-up question" if is_followup else "Ask a question")
+
+    if is_followup:
+        st.caption(
+            "Your follow-up will be answered with the prior turns as context. "
+            "Click **Start new conversation** in the sidebar to reset."
+        )
+
+    with st.form("question_form", clear_on_submit=True):
         q = st.text_area(
             "Clinical question",
             height=100,
-            placeholder="e.g. What's the recommended H. pylori regimen for a "
-                        "penicillin-allergic patient?",
+            placeholder=(
+                "e.g. What about for a penicillin-allergic patient?"
+                if is_followup else
+                "e.g. What's the recommended H. pylori regimen for a "
+                "penicillin-allergic patient?"
+            ),
             label_visibility="collapsed",
         )
         col_submit, _ = st.columns([1, 5])
         with col_submit:
-            submitted = st.form_submit_button("Ask", type="primary",
-                                               use_container_width=True)
+            submitted = st.form_submit_button(
+                "Ask follow-up" if is_followup else "Ask",
+                type="primary",
+                use_container_width=True,
+            )
 
-    # Example-question chips below the form
-    st.caption("Try one of these:")
-    eq_cols = st.columns(len(EXAMPLE_QUESTIONS))
-    selected_example = None
-    for i, eq in enumerate(EXAMPLE_QUESTIONS):
-        with eq_cols[i]:
-            short = eq.split(",")[0].split("?")[0]
-            if len(short) > 60:
-                short = short[:57] + "…"
-            if st.button(short, key=f"eg_{i}", use_container_width=True):
-                selected_example = eq
+    # Example-question chips only on the first turn
+    if not is_followup:
+        st.caption("Try one of these:")
+        eq_cols = st.columns(len(EXAMPLE_QUESTIONS))
+        selected_example = None
+        for i, eq in enumerate(EXAMPLE_QUESTIONS):
+            with eq_cols[i]:
+                short = eq.split(",")[0].split("?")[0]
+                if len(short) > 60:
+                    short = short[:57] + "…"
+                if st.button(short, key=f"eg_{i}", use_container_width=True):
+                    selected_example = eq
 
-    # If an example was clicked, store and rerun so the form picks it up.
-    if selected_example:
-        st.session_state["pending_example"] = selected_example
-        st.rerun()
-    pending = st.session_state.pop("pending_example", None)
-    if pending and not submitted:
-        q = pending
-        submitted = True
+        if selected_example:
+            st.session_state["pending_example"] = selected_example
+            st.rerun()
+        pending = st.session_state.pop("pending_example", None)
+        if pending and not submitted:
+            q = pending
+            submitted = True
 
     # --- handle submission ----
     if submitted and q.strip():
         question = q.strip()
 
-        # 1) PHI screen
         if phi_enabled:
             hits = screen_for_phi(question)
             if hits:
@@ -288,7 +524,6 @@ def render_main_page() -> None:
                 log_phi_block(len(question), hits)
                 return
 
-        # 2) Build filters
         filters: dict[str, Any] = {}
         if society_sel and len(society_sel) < 4:
             filters["society"] = society_sel
@@ -299,18 +534,41 @@ def render_main_page() -> None:
         if doc_type_sel and len(doc_type_sel) < 4:
             filters["doc_type"] = doc_type_sel
 
-        # 3) Call backend
+        # Lazily create the server-side conversation row on the first turn.
+        if st.session_state.conversation_id is None:
+            st.session_state.conversation_id = create_conversation(
+                title=question[:80]
+            )
+
+        history_payload = [
+            {"question": t["question"], "answer": (t.get("result") or {}).get("answer", "")}
+            for t in st.session_state.turns
+        ]
+
         with st.spinner("Retrieving and generating..."):
             t0 = time.time()
-            result = call_answer(question, filters, top_k)
+            result = call_answer(
+                question, filters, top_k,
+                history=history_payload or None,
+                conversation_id=st.session_state.conversation_id,
+            )
             elapsed = time.time() - t0
         if result is None:
             return
 
-        # 4) Log to JSONL (without ballooning record size)
+        st.session_state.turns.append({
+            "question": question,
+            "result": result,
+            "filters": filters,
+            "top_k": top_k,
+            "elapsed_s": round(elapsed, 1),
+        })
+
         append_qa_log({
             "ts": datetime.now(timezone.utc).isoformat(),
             "event": "qa",
+            "conversation_id": st.session_state.conversation_id,
+            "turn_index": len(st.session_state.turns) - 1,
             "question": question,
             "answer": result.get("answer", ""),
             "refused": bool(result.get("refused")),
@@ -322,47 +580,16 @@ def render_main_page() -> None:
             "elapsed_s": round(elapsed, 1),
         })
 
-        # 5) Render answer
-        st.markdown("### Answer")
-        if result.get("refused"):
-            st.warning(
-                "**The corpus didn't cover this question directly.** "
-                "Try broadening filters (more societies / years), rephrasing "
-                "with different terms, or asking about a related published "
-                "topic. Some questions — pediatric GI, surgical decision-"
-                "making, very recent guidelines — are out of scope by design."
-            )
-        st.markdown(
-            render_inline_citations(result.get("answer", "")),
-            unsafe_allow_html=True,
-        )
-        render_citation_badge(result.get("verification") or {})
+        st.rerun()
 
-        # 6) Render retrieved passages
-        chunks = result.get("chunks") or []
-        cited_indices = {c.get("n") for c in (result.get("citations") or [])}
-        if chunks:
-            st.markdown("### Retrieved passages")
-            st.caption(
-                f"{len(chunks)} passages retrieved · "
-                f"{len(cited_indices)} cited in the answer above · "
-                f"answer generated in {elapsed:.1f}s"
-            )
-            for i, chunk in enumerate(chunks, start=1):
-                render_passage_card(
-                    chunk, rank=i, was_cited=(i in cited_indices),
-                )
-
-        # 7) Optional debug view
-        if show_prompt:
-            with st.expander("Debug — SOURCES block sent to Claude", expanded=False):
-                # Reconstruct what the model saw using the same formatter
-                # the backend uses.
-                from src.generate.prompt import build_user_message
-                st.code(
-                    build_user_message(question, chunks),
-                    language="markdown",
-                )
+    # --- conversation thread (rendered every run) ----
+    if st.session_state.turns:
+        st.markdown("---")
+        st.markdown("### Conversation")
+        for i, turn in enumerate(st.session_state.turns):
+            _render_turn(turn, i, show_prompt=show_prompt)
+            if i < len(st.session_state.turns) - 1:
+                st.markdown("---")
 
     render_footer()
 
