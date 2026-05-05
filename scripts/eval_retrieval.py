@@ -113,6 +113,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Seconds to sleep between questions to stay under Cohere's "
              "10/min trial-key rate limit. Set to 0 with a production key.",
     )
+    expand_grp = parser.add_mutually_exclusive_group()
+    expand_grp.add_argument(
+        "--expand", dest="expand", action="store_const", const=True,
+        default=None,
+        help="Force LLM query expansion on for this run, regardless of "
+             "config.yaml retrieval.query_expansion.enabled.",
+    )
+    expand_grp.add_argument(
+        "--no-expand", dest="expand", action="store_const", const=False,
+        help="Force LLM query expansion off for this run.",
+    )
     args = parser.parse_args(argv)
 
     from src.retrieve import retrieve
@@ -139,7 +150,10 @@ def main(argv: list[str] | None = None) -> int:
         rows = []
         try:
             if in_corpus:
-                rows = retrieve(q["question"], top_k=args.top_k)
+                kwargs = {"top_k": args.top_k}
+                if args.expand is not None:
+                    kwargs["expand_query"] = args.expand
+                rows = retrieve(q["question"], **kwargs)
         except Exception as e:
             errors.append(f"{q['id']}: retrieval crashed: {e!r}")
             print(f"  ERROR  {q['id']}  {type(e).__name__}: {e}")

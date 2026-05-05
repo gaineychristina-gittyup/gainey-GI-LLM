@@ -72,6 +72,17 @@ retrieval:
   # Set to 0 to disable the gate (allow all floor promotions, original
   # Phase-3 behavior — useful when debugging recall regressions).
   society_floor_min_rrf_ratio: 0.1
+  # --- Multi-query expansion (Phase 6) ---
+  # When enabled, a Haiku call rewrites the user's question into N concise
+  # paraphrases that make implicit clinical intent explicit (e.g.
+  # "no history of bleeding" → "primary prophylaxis, varices that have
+  # not bled"). Each variant runs as an additional dense+BM25 branch and
+  # is fused into the same RRF pool as the original query. The original
+  # query is always preserved — variants augment, never replace.
+  # Cost: ~$0.001 + ~500ms per query (Haiku).
+  query_expansion:
+    enabled: true
+    n_variants: 3
 
 # ---------- UI (Phase 5) ----------
 ui:

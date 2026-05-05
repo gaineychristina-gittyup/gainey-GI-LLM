@@ -66,6 +66,7 @@ def hybrid_search(
     boost_typed: bool = True,
     n_typed_dense: int = 20,
     n_typed_bm25: int = 20,
+    extra_queries: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Run dense + BM25 in parallel and return the RRF-fused top ``n_fused``.
 
@@ -77,25 +78,48 @@ def hybrid_search(
     RRF as two additional ranked lists. This protects retrieval from cases
     where the table-row text ("col1 | col2 | ...") under-scores a rationale
     paragraph in the open pool — empirically the bug behind the LGD probe.
+
+    ``extra_queries`` (optional) are LLM-generated paraphrases run as
+    additional dense+BM25 branches and fused into the same RRF pool. Use
+    ``query_expand.expanded_queries()`` to produce them. Per-variant pool
+    sizes are scaled down to keep the total candidate count bounded.
     """
     filters = filters or {}
     where_sql, where_params = _filter_clause(filters)
-
-    qvec = embed_query(query)
     do_boost = boost_typed and not filters.get("element_types")
+
+    all_queries = [query]
+    if extra_queries:
+        all_queries.extend(q for q in extra_queries if q and q.strip() != query.strip())
+
+    # Original query gets full per-branch pool size; variants get smaller
+    # pools (1/3 of the original, capped at 20) so they augment without
+    # diluting the original signal — empirically, scaling down the original
+    # cost a typed-floor promotion on the variceal-screening probe.
+    variant_n_dense = min(20, max(15, n_dense // 3))
+    variant_n_bm25 = min(20, max(15, n_bm25 // 3))
+    variant_n_typed_dense = min(15, max(10, n_typed_dense // 3))
+    variant_n_typed_bm25 = min(15, max(10, n_typed_bm25 // 3))
 
     branches: list[list[dict]] = []
     with _db() as conn:
         register_vector(conn)
         with conn.cursor() as cur:
-            branches.append(_dense(cur, qvec, where_sql, where_params, n_dense))
-            branches.append(_bm25(cur, query, where_sql, where_params, n_bm25))
+            for idx, q in enumerate(all_queries):
+                is_original = idx == 0
+                qvec = embed_query(q)
+                d_n = n_dense if is_original else variant_n_dense
+                b_n = n_bm25 if is_original else variant_n_bm25
+                branches.append(_dense(cur, qvec, where_sql, where_params, d_n))
+                branches.append(_bm25(cur, q, where_sql, where_params, b_n))
 
-            if do_boost:
-                typed_filters = {**filters, "element_types": list(_BOOSTED_TYPES)}
-                t_where, t_params = _filter_clause(typed_filters)
-                branches.append(_dense(cur, qvec, t_where, t_params, n_typed_dense))
-                branches.append(_bm25(cur, query, t_where, t_params, n_typed_bm25))
+                if do_boost:
+                    typed_filters = {**filters, "element_types": list(_BOOSTED_TYPES)}
+                    t_where, t_params = _filter_clause(typed_filters)
+                    td_n = n_typed_dense if is_original else variant_n_typed_dense
+                    tb_n = n_typed_bm25 if is_original else variant_n_typed_bm25
+                    branches.append(_dense(cur, qvec, t_where, t_params, td_n))
+                    branches.append(_bm25(cur, q, t_where, t_params, tb_n))
 
     fused = _rrf(*branches, k=rrf_k)
     return fused[:n_fused]

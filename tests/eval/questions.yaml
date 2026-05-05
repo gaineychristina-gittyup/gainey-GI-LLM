@@ -140,6 +140,32 @@
   expect_year_min: 2024
   expect_element_types: [recommendation, table]
 
+# --- Implicit-intent / negation queries (regression bar for query expansion) -
+
+- id: varices_primary_prophylaxis_decompensated
+  question: "patient with decompensated cirrhosis, how should you manage esophageal varices if you see them on endoscopy? NO history of bleeding"
+  in_corpus: true
+  expect_society: [AASLD]
+  expect_year_min: 2024
+  expect_element_types: [recommendation, prose]
+  notes: "Negation 'NO history of bleeding' is shorthand for primary prophylaxis. Embedding without query expansion pulls the AVH section to top-1 because 'manage varices on endoscopy' matches AVH-dense AASLD prose. With expansion, the dACLD primary-prophylaxis section should surface."
+
+- id: barretts_lgd_no_dysplasia_progression
+  question: "Barrett's esophagus, no dysplasia on biopsy. How often do I scope?"
+  in_corpus: true
+  expect_society: [ACG]
+  expect_year_min: 2022
+  expect_element_types: [recommendation, table]
+  notes: "Implicit intent: surveillance interval for nondysplastic Barrett's. 'No dysplasia' is a negation — expansion should rephrase to 'nondysplastic BE surveillance interval'."
+
+- id: ibd_remission_steroid_taper
+  question: "Crohn's patient flared, started prednisone. When and how do I taper?"
+  in_corpus: true
+  expect_society: [AGA, ACG]
+  expect_year_min: 2020
+  expect_element_types: [recommendation]
+  notes: "Implicit intent: corticosteroid-sparing strategy in IBD remission maintenance. Casual phrasing — expansion should formalize to 'steroid-sparing therapy', 'remission maintenance'."
+
 # --- intentionally out-of-corpus -------------------------------------------
 
 - id: ercp_anesthesia_pregnancy

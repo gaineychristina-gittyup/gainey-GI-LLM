@@ -21,12 +21,28 @@ recommendation_id, GRADE, element_type, table_html, figure_image_path).
 
 from __future__ import annotations
 
+import logging
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Optional
+
+import yaml
 
 from src.retrieve.hybrid_search import hybrid_search
 from src.retrieve.rerank import rerank_candidates
 
+logger = logging.getLogger(__name__)
+
 __all__ = ["retrieve"]
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_CONFIG = _REPO_ROOT / "config.yaml"
+
+
+@lru_cache(maxsize=1)
+def _load_config(path: str = str(_DEFAULT_CONFIG)) -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
 
 
 def retrieve(
@@ -39,6 +55,8 @@ def retrieve(
     n_bm25: int = 60,
     n_fused: int = 20,
     boost_typed: bool = True,
+    expand_query: Optional[bool] = None,
+    n_query_variants: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     """Run hybrid retrieval and return the top_k chunks with metadata.
 
@@ -64,7 +82,30 @@ def retrieve(
         When True, run an additional dense+BM25 pass restricted to typed
         chunks (table/recommendation/key_concept) and union those into RRF.
         Suppressed automatically if ``filters['element_types']`` is set.
+    expand_query
+        When True, ask Haiku to generate paraphrased query variants and
+        run each as additional dense+BM25 branches in the RRF pool. None
+        (default) reads ``retrieval.query_expansion.enabled`` from
+        config.yaml.
+    n_query_variants
+        How many variants to generate when expansion is on. None reads
+        ``retrieval.query_expansion.n_variants`` from config (default 3).
     """
+    cfg = _load_config().get("retrieval", {}).get("query_expansion", {}) or {}
+    if expand_query is None:
+        expand_query = bool(cfg.get("enabled", False))
+    if n_query_variants is None:
+        n_query_variants = int(cfg.get("n_variants", 3))
+
+    extra: list[str] = []
+    if expand_query and n_query_variants > 0:
+        try:
+            from src.retrieve.query_expand import expanded_queries
+            qs = expanded_queries(query, n=n_query_variants)
+            extra = qs[1:]  # drop the original; hybrid_search adds it back
+        except Exception as e:
+            logger.warning("query expansion skipped: %s", e)
+
     fused = hybrid_search(
         query,
         filters=filters or {},
@@ -72,6 +113,7 @@ def retrieve(
         n_bm25=n_bm25,
         n_fused=n_fused,
         boost_typed=boost_typed,
+        extra_queries=extra or None,
     )
     if rerank:
         return rerank_candidates(query, fused, top_k=top_k)
