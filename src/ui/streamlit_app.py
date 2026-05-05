@@ -111,17 +111,29 @@ def fetch_topics() -> list[str]:
 
 
 def call_answer(
-    query: str, filters: dict[str, Any], top_k: int,
+    query: str,
+    filters: dict[str, Any],
+    top_k: int,
+    *,
+    history: list[dict[str, str]] | None = None,
+    conversation_id: int | None = None,
 ) -> dict[str, Any] | None:
     """POST /answer (non-streaming). Returns the answer dict or None on
-    failure, with the failure already surfaced to the user."""
+    failure, with the failure already surfaced to the user.
+
+    ``history`` is a list of prior ``{question, answer}`` turns from this
+    conversation; the backend threads them as Claude messages so follow-up
+    questions can reference earlier context. When ``conversation_id`` is
+    set, the backend also persists each turn server-side."""
     payload = {
         "query": query,
         "filters": filters or None,
         "top_k": top_k,
         "rerank": True,
         "stream": False,
-        "save": False,  # Phase 5 doesn't use server-side conversation history
+        "save": conversation_id is not None,
+        "conversation_id": conversation_id,
+        "history": history or None,
     }
     try:
         r = requests.post(f"{API_BASE}/answer", json=payload, timeout=300)
@@ -138,6 +150,43 @@ def call_answer(
         st.error(
             f"Could not reach the backend at {API_BASE}. Is `uvicorn "
             f"src.api.app:app` running? ({type(e).__name__})"
+        )
+        return None
+
+
+def create_conversation(title: str | None = None) -> int | None:
+    """POST /conversations to start a server-side thread. Returns the new
+    id, or None if the backend isn't reachable (we degrade gracefully —
+    the in-session thread still works without a persisted row)."""
+    try:
+        r = requests.post(
+            f"{API_BASE}/conversations",
+            json={"title": title},
+            timeout=10,
+        )
+        r.raise_for_status()
+        return int(r.json().get("id"))
+    except requests.RequestException:
+        return None
+
+
+def submit_feedback(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """POST /feedback. Returns the triage record on success."""
+    try:
+        r = requests.post(f"{API_BASE}/feedback", json=payload, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except requests.HTTPError as e:
+        st.error(
+            f"Couldn't submit the report (HTTP {e.response.status_code}). "
+            "Please try again, or copy your description and email it."
+        )
+        return None
+    except requests.RequestException as e:
+        st.error(
+            f"Couldn't reach the backend at {API_BASE} to submit the "
+            f"report ({type(e).__name__}). Your description is preserved "
+            "in the form."
         )
         return None
 
@@ -277,6 +326,142 @@ def render_saved_history(rec: dict[str, Any]) -> None:
     )
 
 
+def _render_feedback_form(
+    *,
+    conversation_id: int | None,
+    last_turn: dict[str, Any] | None,
+) -> None:
+    """Sidebar form letting the user submit an error report.
+
+    Pre-fills hidden context (last question, last answer, retrieved chunk
+    ids, verification flags, filter state) so the developer triaging the
+    report has the same view the reporter did. Each report comes back
+    with a tracking id (FB-XXXXXXXXXX) and a category-specific triage
+    hint summarising what the team will do with it.
+    """
+    with st.expander("🐞 Report a problem", expanded=False):
+        st.caption(
+            "Tell us what went wrong. The most recent question and answer "
+            "are attached so we can reproduce the issue."
+        )
+        with st.form("feedback_form", clear_on_submit=True):
+            category = st.selectbox(
+                "What's the issue?",
+                options=[
+                    ("wrong_answer", "Answer is wrong or misleading"),
+                    ("missing_source",
+                     "A guideline I expected wasn't cited or retrieved"),
+                    ("wrongly_refused",
+                     "It refused but the corpus does cover this"),
+                    ("ui_bug", "UI / display bug"),
+                    ("other", "Something else"),
+                ],
+                format_func=lambda x: x[1],
+            )
+            description = st.text_area(
+                "Describe what went wrong",
+                height=120,
+                placeholder=(
+                    "e.g. The answer cited only ACG, but the AGA 2024 "
+                    "gastroparesis guideline has a Recommendation that "
+                    "should have been retrieved."
+                ),
+            )
+            contact = st.text_input(
+                "Email (optional — only if you want a follow-up)",
+                placeholder="you@example.com",
+            )
+            attach_last = st.checkbox(
+                "Attach the most recent Q&A to this report",
+                value=True,
+                disabled=last_turn is None,
+                help=(
+                    "When checked, the question, answer, retrieved chunk "
+                    "ids, citation list, and active filters are sent so "
+                    "the team can reproduce the issue."
+                ),
+            )
+            submitted = st.form_submit_button("Submit report", type="primary")
+
+        if not submitted:
+            return
+        if not description.strip():
+            st.error("Please describe what went wrong.")
+            return
+
+        payload: dict[str, Any] = {
+            "category": category[0],
+            "description": description.strip(),
+            "contact": contact.strip() or None,
+            "conversation_id": conversation_id,
+        }
+        if attach_last and last_turn is not None:
+            result = last_turn.get("result") or {}
+            chunk_ids = [
+                c.get("chunk_id") for c in (result.get("chunks") or [])
+            ]
+            payload["question"] = last_turn.get("question")
+            payload["answer"] = result.get("answer")
+            payload["context"] = {
+                "filters": last_turn.get("filters") or {},
+                "top_k": last_turn.get("top_k"),
+                "chunk_ids": chunk_ids,
+                "citations": result.get("citations") or [],
+                "verification": result.get("verification") or {},
+                "model": result.get("model"),
+                "refused": bool(result.get("refused")),
+                "elapsed_s": last_turn.get("elapsed_s"),
+            }
+
+        with st.spinner("Submitting report..."):
+            triage = submit_feedback(payload)
+        if triage is None:
+            return
+
+        append_qa_log({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": "feedback",
+            "report_id": triage.get("report_id"),
+            "category": triage.get("category"),
+            "conversation_id": conversation_id,
+        })
+
+        st.success(
+            f"Report **{triage.get('report_id')}** received. "
+            f"{triage.get('triage_hint', '')}"
+        )
+
+
+def _render_prior_turn(turn: dict[str, Any], turn_idx: int) -> None:
+    """Render one prior turn in the active conversation thread.
+
+    The latest turn is rendered separately by the main flow (with the
+    full source pane in col_pane). Prior turns get a compact
+    expander-based view so the column doesn't grow unbounded.
+    """
+    question = turn.get("question") or ""
+    result = turn.get("result") or {}
+
+    st.markdown(f"**Q{turn_idx + 1}.** {question}")
+    if result.get("refused"):
+        st.warning(
+            "**The corpus didn't cover this question directly.** "
+            "Try broadening filters or rephrasing.",
+            icon="⚠",
+        )
+    st.markdown(
+        render_inline_citations(result.get("answer", "")),
+        unsafe_allow_html=True,
+    )
+    n_chunks = len(result.get("chunks") or [])
+    n_cited = len(result.get("citations") or [])
+    elapsed = turn.get("elapsed_s")
+    bits = [f"{n_chunks} retrieved", f"{n_cited} cited"]
+    if elapsed is not None:
+        bits.append(f"{elapsed}s")
+    st.caption(" · ".join(bits))
+
+
 # --- main page rendering ---------------------------------------------------
 
 
@@ -339,6 +524,12 @@ def render_main_page() -> None:
 
     render_corpus_snapshot_header(title, subtitle)
 
+    # --- session state for the active conversation thread ----
+    if "turns" not in st.session_state:
+        st.session_state.turns = []  # list[{question, result, filters, top_k, elapsed_s}]
+    if "conversation_id" not in st.session_state:
+        st.session_state.conversation_id = None
+
     # --- sidebar: conversations + filters ----
     history = read_qa_history(limit=50)
     # Handle clicks on sidebar-conversation and suggested-question links
@@ -368,6 +559,23 @@ def render_main_page() -> None:
         st.rerun()
 
     with st.sidebar:
+        # Active thread controls — only shown when a thread is in progress.
+        if st.session_state.turns:
+            n = len(st.session_state.turns)
+            st.markdown(
+                f"#### Active thread · {n} turn{'s' if n != 1 else ''}"
+            )
+            if st.button(
+                "🗑 Start new conversation",
+                use_container_width=True,
+                key="start_new_conv",
+            ):
+                st.session_state.turns = []
+                st.session_state.conversation_id = None
+                st.session_state.pop("viewing_history", None)
+                st.rerun()
+            st.markdown("---")
+
         st.markdown("#### Conversations")
         if not history:
             st.caption(
@@ -445,6 +653,14 @@ def render_main_page() -> None:
                 )
 
         st.markdown("---")
+        _render_feedback_form(
+            conversation_id=st.session_state.conversation_id,
+            last_turn=(
+                st.session_state.turns[-1] if st.session_state.turns else None
+            ),
+        )
+
+        st.markdown("---")
         st.caption(
             f"Backend: `{API_BASE}` · "
             f"Snapshot: {read_corpus_snapshot()}"
@@ -468,19 +684,43 @@ def render_main_page() -> None:
     phi_msg: str | None = None
 
     with col_main:
-        st.subheader("Ask a question")
-        with st.form("question_form", clear_on_submit=False):
+        is_followup = bool(st.session_state.turns)
+
+        # Render any prior turns at the top of col_main so the user can
+        # see the thread they're following up on. The latest turn's
+        # answer renders below the form (next block).
+        if is_followup:
+            st.markdown("### Conversation")
+            for i, turn in enumerate(st.session_state.turns):
+                _render_prior_turn(turn, i)
+                st.markdown("---")
+            st.subheader("Follow-up question")
+            st.caption(
+                "Your follow-up will be answered with the prior turns as "
+                "context. Click **Start new conversation** in the sidebar "
+                "to reset."
+            )
+        else:
+            st.subheader("Ask a question")
+
+        with st.form("question_form", clear_on_submit=is_followup):
             q = st.text_area(
                 "Clinical question",
                 height=100,
-                placeholder="e.g. What's the recommended H. pylori regimen for a "
-                            "penicillin-allergic patient?",
+                placeholder=(
+                    "e.g. What about for a penicillin-allergic patient?"
+                    if is_followup else
+                    "e.g. What's the recommended H. pylori regimen for a "
+                    "penicillin-allergic patient?"
+                ),
                 label_visibility="collapsed",
             )
             col_submit, _ = st.columns([1, 5])
             with col_submit:
                 submitted = st.form_submit_button(
-                    "Ask", type="primary", use_container_width=True,
+                    "Ask follow-up" if is_followup else "Ask",
+                    type="primary",
+                    use_container_width=True,
                 )
 
         # If the query-param handler at the top of the page stashed a
@@ -550,14 +790,41 @@ def render_main_page() -> None:
                 if doc_type_sel and len(doc_type_sel) < 4:
                     filters["doc_type"] = doc_type_sel
 
+                # Lazily open a server-side conversation on the first turn.
+                if st.session_state.conversation_id is None:
+                    st.session_state.conversation_id = create_conversation(
+                        title=question[:80]
+                    )
+
+                history_payload = [
+                    {
+                        "question": t["question"],
+                        "answer": (t.get("result") or {}).get("answer", ""),
+                    }
+                    for t in st.session_state.turns
+                ]
+
                 with st.spinner("Retrieving and generating..."):
                     t0 = time.time()
-                    result = call_answer(question, filters, top_k)
+                    result = call_answer(
+                        question, filters, top_k,
+                        history=history_payload or None,
+                        conversation_id=st.session_state.conversation_id,
+                    )
                     elapsed = time.time() - t0
                 if result is not None:
+                    st.session_state.turns.append({
+                        "question": question,
+                        "result": result,
+                        "filters": filters,
+                        "top_k": top_k,
+                        "elapsed_s": round(elapsed, 1),
+                    })
                     append_qa_log({
                         "ts": datetime.now(timezone.utc).isoformat(),
                         "event": "qa",
+                        "conversation_id": st.session_state.conversation_id,
+                        "turn_index": len(st.session_state.turns) - 1,
                         "question": question,
                         "answer": result.get("answer", ""),
                         "refused": bool(result.get("refused")),
